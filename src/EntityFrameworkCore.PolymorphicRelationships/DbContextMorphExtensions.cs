@@ -166,8 +166,8 @@ public static class DbContextMorphExtensions
             configure(batchLoadPlan);
         }
 
-        var dependentList = dependents.Where(dependent => dependent is not null).Distinct().ToList();
-        var results = new Dictionary<TDependent, object?>();
+        var dependentList = CollectDistinctEntities(dependents);
+        var results = new Dictionary<TDependent, object?>(dependentList.Count);
 
         if (dependentList.Count == 0)
         {
@@ -175,38 +175,40 @@ public static class DbContextMorphExtensions
         }
 
         var reference = PolymorphicModelMetadata.GetRequiredReference(dbContext.Model, typeof(TDependent), relationshipName);
-        var groupedDependents = dependentList
-            .Select(dependent => new
-            {
-                Dependent = dependent,
-                Entry = dbContext.Entry(dependent),
-            })
-            .Select(item => new
-            {
-                item.Dependent,
-                TypeAlias = item.Entry.Property<string?>(reference.TypePropertyName).CurrentValue,
-                OwnerId = item.Entry.Property(reference.IdPropertyName).CurrentValue,
-            })
-            .ToList();
+        var groupedDependents = new Dictionary<string, List<MorphDependentState<TDependent>>>(StringComparer.Ordinal);
 
-        foreach (var item in groupedDependents.Where(item => string.IsNullOrWhiteSpace(item.TypeAlias) || item.OwnerId is null))
+        foreach (var dependent in dependentList)
         {
-            AssignProperty(item.Dependent!, relationshipName, null);
-            results[item.Dependent!] = null;
+            var typeAlias = GetPropertyValueViaEntry(dbContext, dependent, reference.TypePropertyName) as string;
+            var ownerId = GetPropertyValueViaEntry(dbContext, dependent, reference.IdPropertyName);
+
+            if (string.IsNullOrWhiteSpace(typeAlias) || ownerId is null)
+            {
+                AssignProperty(dependent, relationshipName, null);
+                results[dependent] = null;
+                continue;
+            }
+
+            if (!groupedDependents.TryGetValue(typeAlias, out var items))
+            {
+                items = new List<MorphDependentState<TDependent>>();
+                groupedDependents.Add(typeAlias, items);
+            }
+
+            items.Add(new MorphDependentState<TDependent>(dependent, ownerId));
         }
 
-        foreach (var aliasGroup in groupedDependents
-                     .Where(item => !string.IsNullOrWhiteSpace(item.TypeAlias) && item.OwnerId is not null)
-                     .GroupBy(item => item.TypeAlias!, StringComparer.Ordinal))
+        foreach (var aliasGroup in groupedDependents)
         {
             var association = reference.Associations.FirstOrDefault(candidate => string.Equals(candidate.Alias, aliasGroup.Key, StringComparison.Ordinal))
                 ?? throw new InvalidOperationException($"Type alias '{aliasGroup.Key}' is not registered for relationship '{relationshipName}'.");
 
             var keyPropertyType = GetPropertyType(dbContext, association.PrincipalType, association.PrincipalKeyPropertyName);
-            var ownerIds = aliasGroup
-                .Select(item => PolymorphicValueConverter.ConvertForAssignment(item.OwnerId, keyPropertyType)!)
-                .Distinct()
-                .ToArray();
+            var ownerIds = new HashSet<object>(EqualityComparer<object>.Default);
+            foreach (var item in aliasGroup.Value)
+            {
+                ownerIds.Add(NormalizeLookupKey(item.OwnerId, keyPropertyType));
+            }
 
             var owners = await LoadMorphOwnersAsync(
                 dbContext,
@@ -220,11 +222,11 @@ public static class DbContextMorphExtensions
                 owner => owner,
                 EqualityComparer<object>.Default);
 
-            foreach (var item in aliasGroup)
+            foreach (var item in aliasGroup.Value)
             {
                 var owner = ownersById.GetValueOrDefault(NormalizeLookupKey(item.OwnerId, keyPropertyType));
-                AssignProperty(item.Dependent!, relationshipName, owner);
-                results[item.Dependent!] = owner;
+                AssignProperty(item.Dependent, relationshipName, owner);
+                results[item.Dependent] = owner;
             }
         }
 
@@ -344,8 +346,8 @@ public static class DbContextMorphExtensions
         ArgumentNullException.ThrowIfNull(dbContext);
         ArgumentNullException.ThrowIfNull(principals);
 
-        var principalList = principals.Where(principal => principal is not null).Distinct().ToList();
-        var results = new Dictionary<TPrincipal, IReadOnlyList<TDependent>>();
+        var principalList = CollectDistinctEntities(principals);
+        var results = new Dictionary<TPrincipal, IReadOnlyList<TDependent>>(principalList.Count);
 
         if (principalList.Count == 0)
         {
@@ -359,19 +361,19 @@ public static class DbContextMorphExtensions
             inverseRelationshipName,
             MorphMultiplicity.Many);
 
-        var principalIds = principalList
-            .Select(principal => new
-            {
-                Principal = principal,
-                OwnerId = GetEntityKeyValueOrNull(dbContext, principal!, association.PrincipalKeyPropertyName),
-            })
-            .ToList();
+        var principalIds = new List<EntityKeyState<TPrincipal>>(principalList.Count);
+        var ownerIds = new HashSet<object>(EqualityComparer<object>.Default);
 
-        var ownerIds = principalIds
-            .Where(item => item.OwnerId is not null)
-            .Select(item => PolymorphicValueConverter.ConvertForAssignment(item.OwnerId, reference.IdPropertyType)!)
-            .Distinct()
-            .ToArray();
+        foreach (var principal in principalList)
+        {
+            var ownerId = GetEntityKeyValueOrNull(dbContext, principal, association.PrincipalKeyPropertyName);
+            principalIds.Add(new EntityKeyState<TPrincipal>(principal, ownerId));
+
+            if (ownerId is not null)
+            {
+                ownerIds.Add(NormalizeLookupKey(ownerId, reference.IdPropertyType));
+            }
+        }
 
         var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
         query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
@@ -379,21 +381,29 @@ public static class DbContextMorphExtensions
 
         var dependents = await query.ToListAsync(cancellationToken);
 
-        var groupedDependents = dependents
-            .GroupBy(dependent => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, dependent, reference.IdPropertyName), reference.IdPropertyType), EqualityComparer<object>.Default)
-            .ToDictionary(
-                group => group.Key,
-                group => (IReadOnlyList<TDependent>)group.ToList(),
-                EqualityComparer<object>.Default);
+        var groupedDependents = new Dictionary<object, List<TDependent>>(EqualityComparer<object>.Default);
+        foreach (var dependent in dependents)
+        {
+            var key = NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, dependent, reference.IdPropertyName), reference.IdPropertyType);
+            if (!groupedDependents.TryGetValue(key, out var items))
+            {
+                items = new List<TDependent>();
+                groupedDependents.Add(key, items);
+            }
+
+            items.Add(dependent);
+        }
 
         foreach (var item in principalIds)
         {
-            var value = item.OwnerId is null
+            IReadOnlyList<TDependent> value = item.OwnerId is null
                 ? Array.Empty<TDependent>()
-                : groupedDependents.GetValueOrDefault(NormalizeLookupKey(item.OwnerId, reference.IdPropertyType)) ?? Array.Empty<TDependent>();
+                : groupedDependents.TryGetValue(NormalizeLookupKey(item.OwnerId, reference.IdPropertyType), out var items)
+                    ? items
+                    : Array.Empty<TDependent>();
 
-            AssignProperty(item.Principal!, inverseRelationshipName, value);
-            results[item.Principal!] = value;
+            AssignProperty(item.Entity, inverseRelationshipName, value);
+            results[item.Entity] = value;
         }
 
         return results;
@@ -706,8 +716,8 @@ public static class DbContextMorphExtensions
         ArgumentNullException.ThrowIfNull(dbContext);
         ArgumentNullException.ThrowIfNull(principals);
 
-        var principalList = principals.Where(principal => principal is not null).Distinct().ToList();
-        var results = new Dictionary<TPrincipal, IReadOnlyList<TRelated>>();
+        var principalList = CollectDistinctEntities(principals);
+        var results = new Dictionary<TPrincipal, IReadOnlyList<TRelated>>(principalList.Count);
 
         if (principalList.Count == 0)
         {
@@ -715,19 +725,18 @@ public static class DbContextMorphExtensions
         }
 
         var relation = PolymorphicModelMetadata.GetRequiredManyToMany(dbContext.Model, typeof(TPrincipal), typeof(TRelated), relationshipName);
-        var principalIds = principalList
-            .Select(principal => new
-            {
-                Principal = principal,
-                OwnerId = GetEntityKeyValueOrNull(dbContext, principal!, relation.PrincipalKeyPropertyName),
-            })
-            .ToList();
+        var principalIds = new List<EntityKeyState<TPrincipal>>(principalList.Count);
+        var ownerIds = new HashSet<object>(EqualityComparer<object>.Default);
+        foreach (var principal in principalList)
+        {
+            var ownerId = GetEntityKeyValueOrNull(dbContext, principal, relation.PrincipalKeyPropertyName);
+            principalIds.Add(new EntityKeyState<TPrincipal>(principal, ownerId));
 
-        var ownerIds = principalIds
-            .Where(item => item.OwnerId is not null)
-            .Select(item => PolymorphicValueConverter.ConvertForAssignment(item.OwnerId, relation.PivotIdPropertyType)!)
-            .Distinct()
-            .ToArray();
+            if (ownerId is not null)
+            {
+                ownerIds.Add(NormalizeLookupKey(ownerId, relation.PivotIdPropertyType));
+            }
+        }
 
         var pivotRows = await PolymorphicQueryExecutor.ListByPropertyValuesAsync(
             dbContext,
@@ -737,17 +746,22 @@ public static class DbContextMorphExtensions
             ownerIds,
             cancellationToken);
 
-        var filteredPivots = pivotRows
-            .Where(pivot => string.Equals(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotTypePropertyName) as string, relation.PrincipalAlias, StringComparison.Ordinal))
-            .ToList();
+        var filteredPivots = new List<object>(pivotRows.Count);
+        var relatedIds = new HashSet<object>(EqualityComparer<object>.Default);
+        foreach (var pivot in pivotRows)
+        {
+            if (!string.Equals(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotTypePropertyName) as string, relation.PrincipalAlias, StringComparison.Ordinal))
+            {
+                continue;
+            }
 
-        var relatedIds = filteredPivots
-            .Select(pivot => GetPropertyValueViaEntry(dbContext, pivot, relation.PivotRelatedIdPropertyName))
-            .Where(value => value is not null)
-            .Cast<object>()
-            .Select(value => PolymorphicValueConverter.ConvertForAssignment(value, relation.RelatedKeyType)!)
-            .Distinct()
-            .ToArray();
+            filteredPivots.Add(pivot);
+            var relatedId = GetPropertyValueViaEntry(dbContext, pivot, relation.PivotRelatedIdPropertyName);
+            if (relatedId is not null)
+            {
+                relatedIds.Add(NormalizeLookupKey(relatedId, relation.RelatedKeyType));
+            }
+        }
 
         var query = ApplyQueryTransform(dbContext.Set<TRelated>().AsQueryable(), queryTransform);
         query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds);
@@ -758,9 +772,18 @@ public static class DbContextMorphExtensions
             related => related,
             EqualityComparer<object>.Default);
 
-        var groupedPivots = filteredPivots
-            .GroupBy(pivot => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotIdPropertyName), relation.PivotIdPropertyType), EqualityComparer<object>.Default)
-            .ToDictionary(group => group.Key, group => group.ToList(), EqualityComparer<object>.Default);
+        var groupedPivots = new Dictionary<object, List<object>>(EqualityComparer<object>.Default);
+        foreach (var pivot in filteredPivots)
+        {
+            var key = NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotIdPropertyName), relation.PivotIdPropertyType);
+            if (!groupedPivots.TryGetValue(key, out var items))
+            {
+                items = new List<object>();
+                groupedPivots.Add(key, items);
+            }
+
+            items.Add(pivot);
+        }
 
         foreach (var item in principalIds)
         {
@@ -768,17 +791,29 @@ public static class DbContextMorphExtensions
                 ? null
                 : NormalizeLookupKey(item.OwnerId, relation.PivotIdPropertyType);
 
-            IReadOnlyList<TRelated> relatedValues = ownerKey is null || !groupedPivots.TryGetValue(ownerKey, out var ownerPivots)
-                ? Array.Empty<TRelated>()
-                : ownerPivots
-                    .Select(pivot => relatedLookup.GetValueOrDefault(NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotRelatedIdPropertyName), relation.RelatedKeyType)))
-                    .Where(related => related is not null)
-                    .Distinct()
-                    .Cast<TRelated>()
-                    .ToList();
+            IReadOnlyList<TRelated> relatedValues;
+            if (ownerKey is null || !groupedPivots.TryGetValue(ownerKey, out var ownerPivots))
+            {
+                relatedValues = Array.Empty<TRelated>();
+            }
+            else
+            {
+                var unique = new HashSet<TRelated>();
+                var list = new List<TRelated>();
+                foreach (var pivot in ownerPivots)
+                {
+                    var related = relatedLookup.GetValueOrDefault(NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotRelatedIdPropertyName), relation.RelatedKeyType));
+                    if (related is not null && unique.Add(related))
+                    {
+                        list.Add(related);
+                    }
+                }
 
-            AssignProperty(item.Principal!, relationshipName, relatedValues);
-            results[item.Principal!] = relatedValues;
+                relatedValues = list;
+            }
+
+            AssignProperty(item.Entity, relationshipName, relatedValues);
+            results[item.Entity] = relatedValues;
         }
 
         return results;
@@ -872,8 +907,8 @@ public static class DbContextMorphExtensions
         ArgumentNullException.ThrowIfNull(dbContext);
         ArgumentNullException.ThrowIfNull(relatedEntities);
 
-        var relatedList = relatedEntities.Where(related => related is not null).Distinct().ToList();
-        var results = new Dictionary<TRelated, IReadOnlyList<TPrincipal>>();
+        var relatedList = CollectDistinctEntities(relatedEntities);
+        var results = new Dictionary<TRelated, IReadOnlyList<TPrincipal>>(relatedList.Count);
 
         if (relatedList.Count == 0)
         {
@@ -881,19 +916,18 @@ public static class DbContextMorphExtensions
         }
 
         var relation = PolymorphicModelMetadata.GetRequiredMorphedByMany(dbContext.Model, typeof(TRelated), typeof(TPrincipal), inverseRelationshipName);
-        var relatedIds = relatedList
-            .Select(related => new
-            {
-                Related = related,
-                RelatedId = GetEntityKeyValueOrNull(dbContext, related!, relation.RelatedKeyPropertyName),
-            })
-            .ToList();
+        var relatedIds = new List<EntityKeyState<TRelated>>(relatedList.Count);
+        var keyValues = new HashSet<object>(EqualityComparer<object>.Default);
+        foreach (var related in relatedList)
+        {
+            var relatedId = GetEntityKeyValueOrNull(dbContext, related, relation.RelatedKeyPropertyName);
+            relatedIds.Add(new EntityKeyState<TRelated>(related, relatedId));
 
-        var keyValues = relatedIds
-            .Where(item => item.RelatedId is not null)
-            .Select(item => PolymorphicValueConverter.ConvertForAssignment(item.RelatedId, relation.PivotRelatedIdPropertyType)!)
-            .Distinct()
-            .ToArray();
+            if (relatedId is not null)
+            {
+                keyValues.Add(NormalizeLookupKey(relatedId, relation.PivotRelatedIdPropertyType));
+            }
+        }
 
         var pivotRows = await PolymorphicQueryExecutor.ListByPropertyValuesAsync(
             dbContext,
@@ -903,17 +937,22 @@ public static class DbContextMorphExtensions
             keyValues,
             cancellationToken);
 
-        var filteredPivots = pivotRows
-            .Where(pivot => string.Equals(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotTypePropertyName) as string, relation.PrincipalAlias, StringComparison.Ordinal))
-            .ToList();
+        var filteredPivots = new List<object>(pivotRows.Count);
+        var principalIds = new HashSet<object>(EqualityComparer<object>.Default);
+        foreach (var pivot in pivotRows)
+        {
+            if (!string.Equals(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotTypePropertyName) as string, relation.PrincipalAlias, StringComparison.Ordinal))
+            {
+                continue;
+            }
 
-        var principalIds = filteredPivots
-            .Select(pivot => GetPropertyValueViaEntry(dbContext, pivot, relation.PivotIdPropertyName))
-            .Where(value => value is not null)
-            .Cast<object>()
-            .Select(value => PolymorphicValueConverter.ConvertForAssignment(value, relation.PrincipalKeyType)!)
-            .Distinct()
-            .ToArray();
+            filteredPivots.Add(pivot);
+            var principalId = GetPropertyValueViaEntry(dbContext, pivot, relation.PivotIdPropertyName);
+            if (principalId is not null)
+            {
+                principalIds.Add(NormalizeLookupKey(principalId, relation.PrincipalKeyType));
+            }
+        }
 
         var query = ApplyQueryTransform(dbContext.Set<TPrincipal>().AsQueryable(), queryTransform);
         query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds);
@@ -924,27 +963,48 @@ public static class DbContextMorphExtensions
             principal => principal,
             EqualityComparer<object>.Default);
 
-        var groupedPivots = filteredPivots
-            .GroupBy(pivot => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotRelatedIdPropertyName), relation.PivotRelatedIdPropertyType), EqualityComparer<object>.Default)
-            .ToDictionary(group => group.Key, group => group.ToList(), EqualityComparer<object>.Default);
+        var groupedPivots = new Dictionary<object, List<object>>(EqualityComparer<object>.Default);
+        foreach (var pivot in filteredPivots)
+        {
+            var key = NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotRelatedIdPropertyName), relation.PivotRelatedIdPropertyType);
+            if (!groupedPivots.TryGetValue(key, out var items))
+            {
+                items = new List<object>();
+                groupedPivots.Add(key, items);
+            }
+
+            items.Add(pivot);
+        }
 
         foreach (var item in relatedIds)
         {
-            var relatedKey = item.RelatedId is null
+            var relatedKey = item.OwnerId is null
                 ? null
-                : NormalizeLookupKey(item.RelatedId, relation.PivotRelatedIdPropertyType);
+                : NormalizeLookupKey(item.OwnerId, relation.PivotRelatedIdPropertyType);
 
-            IReadOnlyList<TPrincipal> owners = relatedKey is null || !groupedPivots.TryGetValue(relatedKey, out var entityPivots)
-                ? Array.Empty<TPrincipal>()
-                : entityPivots
-                    .Select(pivot => principalLookup.GetValueOrDefault(NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotIdPropertyName), relation.PrincipalKeyType)))
-                    .Where(principal => principal is not null)
-                    .Distinct()
-                    .Cast<TPrincipal>()
-                    .ToList();
+            IReadOnlyList<TPrincipal> owners;
+            if (relatedKey is null || !groupedPivots.TryGetValue(relatedKey, out var entityPivots))
+            {
+                owners = Array.Empty<TPrincipal>();
+            }
+            else
+            {
+                var unique = new HashSet<TPrincipal>();
+                var list = new List<TPrincipal>();
+                foreach (var pivot in entityPivots)
+                {
+                    var principal = principalLookup.GetValueOrDefault(NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotIdPropertyName), relation.PrincipalKeyType));
+                    if (principal is not null && unique.Add(principal))
+                    {
+                        list.Add(principal);
+                    }
+                }
 
-            AssignProperty(item.Related!, inverseRelationshipName, owners);
-            results[item.Related!] = owners;
+                owners = list;
+            }
+
+            AssignProperty(item.Entity, inverseRelationshipName, owners);
+            results[item.Entity] = owners;
         }
 
         return results;
@@ -1004,6 +1064,23 @@ public static class DbContextMorphExtensions
             cancellationToken);
     }
 
+    private static List<TEntity> CollectDistinctEntities<TEntity>(IEnumerable<TEntity> entities)
+        where TEntity : class
+    {
+        var results = new List<TEntity>();
+        var seen = new HashSet<TEntity>();
+
+        foreach (var entity in entities)
+        {
+            if (entity is not null && seen.Add(entity))
+            {
+                results.Add(entity);
+            }
+        }
+
+        return results;
+    }
+
     private static IQueryable<TEntity> ApplyQueryTransform<TEntity>(
         IQueryable<TEntity> query,
         Func<IQueryable<TEntity>, IQueryable<TEntity>>? queryTransform)
@@ -1037,6 +1114,12 @@ public static class DbContextMorphExtensions
     {
         PolymorphicMemberAccessorCache.AddCollectionValue(target, propertyName, value);
     }
+
+    private sealed record MorphDependentState<TDependent>(TDependent Dependent, object OwnerId)
+        where TDependent : class;
+
+    private sealed record EntityKeyState<TEntity>(TEntity Entity, object? OwnerId)
+        where TEntity : class;
 
 }
 
