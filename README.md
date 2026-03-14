@@ -1,35 +1,26 @@
-# Entity Framework Core Polymorphic Relationships
+# EntityFrameworkCore.PolymorphicRelationships
 
-This repository now has a starter package for Laravel-style polymorphic relationships on top of Entity Framework Core, without database-level foreign keys.
+`EntityFrameworkCore.PolymorphicRelationships` adds Laravel-style polymorphic relationships to Entity Framework Core without requiring database-enforced foreign keys.
 
-## What is in place
+## Overview
 
-- `morphMap`-style aliases via `MorphMap<TEntity>(alias)`
-- `morphTo` registration via `MorphTo(...)`
-- Laravel-style shadow-column conventions via `MorphToConvention(...)`
-- attribute-driven model discovery via `UsePolymorphicRelationshipAttributes()`
-- designer helpers via `HasMorphColumns(...)` and `HasMorphToManyColumns(...)`
-- inverse `morphOne` and `morphMany` registration via `MorphOne<TPrincipal>(...)` and `MorphMany<TPrincipal>(...)`
-- polymorphic many-to-many registration via `MorphToMany(...)` and `MorphedByMany(...)`
-- Laravel-style many-to-many conventions via `MorphToManyConvention(...)` and `MorphedByManyConvention(...)`
-- code-driven cascade deletion through `PolymorphicCascadeDeleteInterceptor`
-- runtime helpers for assigning and loading relationships:
-  - `SetMorphReference(...)`
-  - `LoadMorphAsync(...)`
-  - `LoadMorphsAsync(...)`
-  - per-type eager-loading plans for mixed `morphTo` batches via `LoadMorphsAsync(..., plan => ...)`
-  - `LoadMorphOneAsync(...)`
-  - `LoadMorphManyAsync(...)`
-  - eager-loading query transforms on typed `LoadMorphAsync(...)`, `LoadMorphManyAsync(...)`, `LoadMorphToManyAsync(...)`, and `LoadMorphedByManyAsync(...)`
-  - `LoadMorphLatestOfManyAsync(...)`
-  - `LoadMorphOldestOfManyAsync(...)`
-  - `LoadMorphOneOfManyAsync(...)`
-  - `AttachMorphToMany(...)`
-  - `DetachMorphToManyAsync(...)`
-  - `LoadMorphToManyAsync(...)`
-  - `LoadMorphedByManyAsync(...)`
+- `morphTo` relationships backed by `<name>_type` and `<name>_id`
+- inverse `morphOne` and `morphMany` relationships
+- polymorphic many-to-many relationships with explicit pivot entities
+- Laravel-style naming conventions for morph columns and pivot columns
+- attribute-based relationship discovery
+- runtime helpers for assigning, loading, and batch-loading morph relationships
+- code-driven cascade delete for registered morph relationships
+- save-time integrity validation for morph keys and pivot references
+- migration/scaffolding support for designer helpers and attribute conventions
 
-## Example
+## Installation
+
+```bash
+dotnet add package EntityFrameworkCore.PolymorphicRelationships
+```
+
+## Basic setup
 
 ```csharp
 using EntityFrameworkCore.PolymorphicRelationships;
@@ -78,44 +69,70 @@ var options = new DbContextOptionsBuilder<AppDbContext>()
     .UseSqlServer(connectionString)
     .UsePolymorphicRelationships()
     .Options;
+```
 
-await using var dbContext = new AppDbContext(options);
+## Runtime APIs
 
+### Assign a morph owner
+
+```csharp
 var post = await dbContext.Posts.FindAsync(1);
 var comment = new Comment { Body = "First" };
 
 dbContext.SetMorphReference(comment, nameof(Comment.Commentable), post!);
 dbContext.Comments.Add(comment);
 await dbContext.SaveChangesAsync();
+```
 
+### Load a morph owner
+
+```csharp
 var owner = await dbContext.LoadMorphAsync(comment, nameof(Comment.Commentable));
-var owners = await dbContext.LoadMorphsAsync(new[] { comment }, nameof(Comment.Commentable));
-var ownersWithPlans = await dbContext.LoadMorphsAsync(
-    new[] { comment },
-    nameof(Comment.Commentable),
-    plan => plan.For<Post>(query => query.Include(post => post.Author)));
-var comments = await dbContext.LoadMorphManyAsync<Post, Comment>(post!, nameof(Post.Comments));
-var latestComment = await dbContext.LoadMorphLatestOfManyAsync<Post, Comment, int>(
-    post!,
-    nameof(Post.Comments),
-    entity => entity.Id,
-    assignToPropertyName: nameof(Post.LatestComment));
-
-var tag = new Tag { Name = "featured" };
-dbContext.Tags.Add(tag);
-dbContext.AttachMorphToMany<Post, Tag, Taggable>(post!, nameof(Post.Tags), tag);
-await dbContext.SaveChangesAsync();
-
-var tags = await dbContext.LoadMorphToManyAsync<Post, Tag>(post!, nameof(Post.Tags));
-var posts = await dbContext.LoadMorphedByManyAsync<Tag, Post>(tag, nameof(Tag.Posts));
-
-var ownerWithIncludes = await dbContext.LoadMorphAsync<Comment, Post>(
+var typedOwner = await dbContext.LoadMorphAsync<Comment, Post>(
     comment,
     nameof(Comment.Commentable),
     query => query.Include(post => post.Author));
 ```
 
-## Attribute conventions
+### Batch-load mixed morph owners
+
+```csharp
+var owners = await dbContext.LoadMorphsAsync(comments, nameof(Comment.Commentable));
+
+var ownersWithPlans = await dbContext.LoadMorphsAsync(
+    comments,
+    nameof(Comment.Commentable),
+    plan => plan
+        .For<Post>(query => query.Include(post => post.Author))
+        .For<Video>(query => query.Include(video => video.Channel)));
+```
+
+### Load inverse one-to-many morphs
+
+```csharp
+var comments = await dbContext.LoadMorphManyAsync<Post, Comment>(post, nameof(Post.Comments));
+
+var latestComment = await dbContext.LoadMorphLatestOfManyAsync<Post, Comment, int>(
+    post,
+    nameof(Post.Comments),
+    comment => comment.Id,
+    assignToPropertyName: nameof(Post.LatestComment));
+```
+
+### Load polymorphic many-to-many relationships
+
+```csharp
+var tag = new Tag { Name = "featured" };
+dbContext.Tags.Add(tag);
+
+dbContext.AttachMorphToMany<Post, Tag, Taggable>(post, nameof(Post.Tags), tag);
+await dbContext.SaveChangesAsync();
+
+var tags = await dbContext.LoadMorphToManyAsync<Post, Tag>(post, nameof(Post.Tags));
+var posts = await dbContext.LoadMorphedByManyAsync<Tag, Post>(tag, nameof(Tag.Posts));
+```
+
+## Attribute-based configuration
 
 ```csharp
 using System.ComponentModel.DataAnnotations.Schema;
@@ -163,26 +180,34 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 }
 ```
 
-## Current boundaries
+## Current capabilities
 
-- This is a starter implementation, not full Laravel parity yet.
-- This version assumes the polymorphic owner key is a single column.
-- The safest first use is with assigned keys, such as GUIDs or known integer keys, before calling `SetMorphReference(...)`.
-- Many-to-many currently uses an explicit pivot entity you define in EF Core.
-- One-of-many helpers now order in translated EF Core queries instead of loading the full morph-many collection first.
-- Batch eager-loading is available for `morphTo`, `morphMany`, `morphToMany`, and `morphedByMany`, with typed loaders supporting query transforms for `Include(...)` and filtering, and mixed `morphTo` batches supporting per-type load plans.
-- Integrity validation now runs during `SaveChanges` and `SaveChangesAsync` to reject partial morph key pairs, unknown morph aliases, and references to missing owners.
-- Cascade delete is handled in code during `SaveChanges` or `SaveChangesAsync`, not by the database; for many-to-many that means pivot rows are cleaned up in code.
+- single-column owner keys
+- convention-based and explicit morph registration
+- `morphTo`, `morphOne`, `morphMany`, `morphToMany`, and `morphedByMany`
+- one-of-many helpers with ordered EF queries
+- query-transform overloads for eager loading typed relationships
+- mixed-owner batch loading with per-type plans
+- code-executed cascade delete interception
+- save-time morph integrity validation
+- migration snapshot and scaffolding compatibility for supported helpers
+
+## Current limitations
+
+- no database-level foreign key enforcement
+- many-to-many relationships require an explicit pivot entity
+- composite owner keys are not supported
+- one-of-many selection is limited to a single ordering expression
+- Laravel features such as `morphToMany` custom pivot behavior and broader relationship macros are not yet fully mirrored
+
+## Roadmap
+
+1. Configurable validation levels for existence checks and save-time enforcement
+2. Richer eager-loading plans for nested `morphToMany` and `morphedByMany` batches
+3. Expanded Laravel parity around custom pivot behavior and relationship ergonomics
 
 ## Packaging
 
-- The library project is packable and now includes NuGet metadata, XML docs, symbols, and the root `README.md` in the package.
-- Create a package with `dotnet pack src/EntityFrameworkCore.PolymorphicRelationships/EntityFrameworkCore.PolymorphicRelationships.csproj -c Release`.
-
-## Near-term next steps
-
-1. Add configurable validation levels so existence checks can be relaxed or made stricter per context.
-2. Add richer eager-loading plans for nested `morphToMany` and `morphedByMany` batches.
-3. Decide whether to align the package id and namespace with the GitHub repository name.
-
-
+```bash
+dotnet pack src/EntityFrameworkCore.PolymorphicRelationships/EntityFrameworkCore.PolymorphicRelationships.csproj -c Release
+```
