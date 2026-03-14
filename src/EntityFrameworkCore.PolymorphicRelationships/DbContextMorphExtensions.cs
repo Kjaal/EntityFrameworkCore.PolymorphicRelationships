@@ -1,12 +1,16 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Linq.Expressions;
+using System.Runtime.CompilerServices;
 using EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace EntityFrameworkCore.PolymorphicRelationships;
 
 public static class DbContextMorphExtensions
 {
+    private static readonly ConditionalWeakTable<IReadOnlyModel, Dictionary<(Type EntityType, string PropertyName), Type>> PropertyTypeCache = new();
+
     public static void SetMorphReference<TDependent, TPrincipal>(
         this DbContext dbContext,
         TDependent dependent,
@@ -949,10 +953,20 @@ public static class DbContextMorphExtensions
 
     private static Type GetPropertyType(DbContext dbContext, Type entityType, string propertyName)
     {
+        var cache = PropertyTypeCache.GetValue(dbContext.Model, static _ => new Dictionary<(Type EntityType, string PropertyName), Type>());
+        var key = (entityType, propertyName);
+
+        if (cache.TryGetValue(key, out var propertyType))
+        {
+            return propertyType;
+        }
+
         var property = dbContext.Model.FindEntityType(entityType)?.FindProperty(propertyName)
             ?? throw new InvalidOperationException($"Property '{propertyName}' was not found on entity '{entityType.Name}'.");
 
-        return property.ClrType;
+        propertyType = property.ClrType;
+        cache[key] = propertyType;
+        return propertyType;
     }
 
     private static object GetEntityKeyValue(DbContext dbContext, object entity, string propertyName)
@@ -1064,14 +1078,12 @@ public static class DbContextMorphExtensions
 
     private static object? GetEntityKeyValueOrNull(DbContext dbContext, object entity, string propertyName)
     {
-        var entry = dbContext.Entry(entity);
-        return entry.Property(propertyName).CurrentValue ?? entry.Property(propertyName).OriginalValue;
+        return PolymorphicMemberAccessorCache.GetValue(dbContext, entity, propertyName);
     }
 
     private static object? GetPropertyValueViaEntry(DbContext dbContext, object entity, string propertyName)
     {
-        var entry = dbContext.Entry(entity);
-        return entry.Property(propertyName).CurrentValue ?? entry.Property(propertyName).OriginalValue;
+        return PolymorphicMemberAccessorCache.GetValue(dbContext, entity, propertyName);
     }
 
     private static string CreateLookupKey(object? value)
@@ -1081,59 +1093,12 @@ public static class DbContextMorphExtensions
 
     private static void AssignProperty(object target, string propertyName, object? value)
     {
-        var property = target.GetType().GetProperty(propertyName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.IgnoreCase);
-        if (property is null || !property.CanWrite)
-        {
-            return;
-        }
-
-        if (value is null)
-        {
-            if (!property.PropertyType.IsValueType || Nullable.GetUnderlyingType(property.PropertyType) is not null)
-            {
-                property.SetValue(target, null);
-            }
-
-            return;
-        }
-
-        if (property.PropertyType.IsInstanceOfType(value))
-        {
-            property.SetValue(target, value);
-        }
+        PolymorphicMemberAccessorCache.SetValue(target, propertyName, value);
     }
 
     private static void AddCollectionValue(object target, string propertyName, object value)
     {
-        var property = target.GetType().GetProperty(propertyName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.IgnoreCase);
-        if (property is null || !property.CanRead || !property.CanWrite)
-        {
-            return;
-        }
-
-        var collection = property.GetValue(target);
-        if (collection is null)
-        {
-            var elementType = property.PropertyType.GenericTypeArguments.FirstOrDefault();
-            if (elementType is null)
-            {
-                return;
-            }
-
-            var listType = typeof(List<>).MakeGenericType(elementType);
-            if (!property.PropertyType.IsAssignableFrom(listType))
-            {
-                return;
-            }
-
-            collection = Activator.CreateInstance(listType);
-            property.SetValue(target, collection);
-        }
-
-        if (collection is IList list && !list.Contains(value))
-        {
-            list.Add(value);
-        }
+        PolymorphicMemberAccessorCache.AddCollectionValue(target, propertyName, value);
     }
 
 }

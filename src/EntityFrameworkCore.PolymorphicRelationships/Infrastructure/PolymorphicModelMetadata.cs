@@ -1,4 +1,5 @@
-﻿using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Metadata;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 
 namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
@@ -9,30 +10,31 @@ internal static class PolymorphicModelMetadata
     private const string ReferencesAnnotation = "EntityFrameworkCore.PolymorphicRelationships:References";
     private const string ManyToManyAnnotation = "EntityFrameworkCore.PolymorphicRelationships:ManyToMany";
     private static readonly JsonSerializerOptions JsonOptions = new();
+    private static readonly ConditionalWeakTable<IReadOnlyModel, CachedState> Cache = new();
 
     public static List<MorphTypeMapping> GetOrCreateTypeMappings(IMutableModel model)
     {
-        return ParseTypeMappings(model.FindAnnotation(TypeMappingsAnnotation)?.Value as string);
+        return GetCachedState(model).TypeMappings;
     }
 
     public static List<MorphReference> GetOrCreateReferences(IMutableModel model)
     {
-        return ParseReferences(model.FindAnnotation(ReferencesAnnotation)?.Value as string);
+        return GetCachedState(model).References;
     }
 
     public static IReadOnlyList<MorphReference> GetReferences(IReadOnlyModel model)
     {
-        return ParseReferences(model.FindAnnotation(ReferencesAnnotation)?.Value as string);
+        return GetCachedState(model).References;
     }
 
     public static List<MorphManyToManyRelation> GetOrCreateManyToManyRelations(IMutableModel model)
     {
-        return ParseManyToManyRelations(model.FindAnnotation(ManyToManyAnnotation)?.Value as string);
+        return GetCachedState(model).ManyToManyRelations;
     }
 
     public static IReadOnlyList<MorphManyToManyRelation> GetManyToManyRelations(IReadOnlyModel model)
     {
-        return ParseManyToManyRelations(model.FindAnnotation(ManyToManyAnnotation)?.Value as string);
+        return GetCachedState(model).ManyToManyRelations;
     }
 
     public static string GetAlias(IReadOnlyModel model, Type clrType)
@@ -44,22 +46,27 @@ internal static class PolymorphicModelMetadata
 
     public static MorphTypeMapping? FindTypeMapping(IReadOnlyModel model, Type clrType)
     {
-        var mappings = ParseTypeMappings(model.FindAnnotation(TypeMappingsAnnotation)?.Value as string);
+        var mappings = GetCachedState(model).TypeMappings;
         return mappings.FirstOrDefault(mapping => mapping.ClrType == clrType)
             ?? mappings.FirstOrDefault(mapping => mapping.ClrType.IsAssignableFrom(clrType));
     }
 
     public static void SyncTypeMappings(IMutableModel model, IEnumerable<MorphTypeMapping> mappings)
     {
-        model.SetAnnotation(TypeMappingsAnnotation, JsonSerializer.Serialize(
-            mappings.Select(mapping => new StoredMorphTypeMapping(mapping.ClrType.AssemblyQualifiedName!, mapping.Alias)).ToList(),
-            JsonOptions));
+        var list = mappings.ToList();
+        var json = JsonSerializer.Serialize(
+            list.Select(mapping => new StoredMorphTypeMapping(mapping.ClrType.AssemblyQualifiedName!, mapping.Alias)).ToList(),
+            JsonOptions);
+
+        model.SetAnnotation(TypeMappingsAnnotation, json);
+        UpdateCachedState(model, typeMappingsJson: json, typeMappings: list);
     }
 
     public static void SyncReferences(IMutableModel model, IEnumerable<MorphReference> references)
     {
-        model.SetAnnotation(ReferencesAnnotation, JsonSerializer.Serialize(
-            references.Select(reference => new StoredMorphReference(
+        var list = references.ToList();
+        var json = JsonSerializer.Serialize(
+            list.Select(reference => new StoredMorphReference(
                 reference.DependentType.AssemblyQualifiedName!,
                 reference.RelationshipName,
                 reference.TypePropertyName,
@@ -72,13 +79,17 @@ internal static class PolymorphicModelMetadata
                     association.Alias,
                     association.Multiplicity,
                     association.DeleteBehavior)).ToList())).ToList(),
-            JsonOptions));
+            JsonOptions);
+
+        model.SetAnnotation(ReferencesAnnotation, json);
+        UpdateCachedState(model, referencesJson: json, references: list);
     }
 
     public static void SyncManyToManyRelations(IMutableModel model, IEnumerable<MorphManyToManyRelation> relations)
     {
-        model.SetAnnotation(ManyToManyAnnotation, JsonSerializer.Serialize(
-            relations.Select(relation => new StoredMorphManyToManyRelation(
+        var list = relations.ToList();
+        var json = JsonSerializer.Serialize(
+            list.Select(relation => new StoredMorphManyToManyRelation(
                 relation.PrincipalType.AssemblyQualifiedName!,
                 relation.RelatedType.AssemblyQualifiedName!,
                 relation.PivotType.AssemblyQualifiedName!,
@@ -95,7 +106,97 @@ internal static class PolymorphicModelMetadata
                 relation.RelatedKeyType.AssemblyQualifiedName!,
                 relation.PrincipalAlias,
                 relation.DeleteBehavior)).ToList(),
-            JsonOptions));
+            JsonOptions);
+
+        model.SetAnnotation(ManyToManyAnnotation, json);
+        UpdateCachedState(model, manyToManyJson: json, manyToManyRelations: list);
+    }
+
+    private static CachedState GetCachedState(IReadOnlyModel model)
+    {
+        var state = Cache.GetValue(model, _ => new CachedState());
+        RefreshState(state, model);
+        return state;
+    }
+
+    private static void UpdateCachedState(
+        IReadOnlyModel model,
+        string? typeMappingsJson = null,
+        List<MorphTypeMapping>? typeMappings = null,
+        string? referencesJson = null,
+        List<MorphReference>? references = null,
+        string? manyToManyJson = null,
+        List<MorphManyToManyRelation>? manyToManyRelations = null)
+    {
+        var state = Cache.GetValue(model, _ => new CachedState());
+
+        if (typeMappingsJson is not null && typeMappings is not null)
+        {
+            state.TypeMappingsJson = typeMappingsJson;
+            state.TypeMappings = typeMappings;
+        }
+
+        if (referencesJson is not null && references is not null)
+        {
+            state.ReferencesJson = referencesJson;
+            state.References = references;
+            state.ReferencesByDependent = references.ToDictionary(
+                reference => (reference.DependentType, reference.RelationshipName),
+                reference => reference);
+            state.InverseAssociations = references
+                .SelectMany(reference => reference.Associations.Select(association => new ReferenceAssociation(reference, association)))
+                .GroupBy(item => (item.Reference.DependentType, item.Association.InverseRelationshipName, item.Association.Multiplicity))
+                .ToDictionary(group => group.Key, group => group.ToList());
+        }
+
+        if (manyToManyJson is not null && manyToManyRelations is not null)
+        {
+            state.ManyToManyJson = manyToManyJson;
+            state.ManyToManyRelations = manyToManyRelations;
+            state.ManyToManyByRelationship = manyToManyRelations
+                .GroupBy(relation => relation.RelationshipName, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+            state.ManyToManyByInverseRelationship = manyToManyRelations
+                .GroupBy(relation => relation.InverseRelationshipName, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+        }
+    }
+
+    private static void RefreshState(CachedState state, IReadOnlyModel model)
+    {
+        var typeMappingsJson = model.FindAnnotation(TypeMappingsAnnotation)?.Value as string;
+        if (!string.Equals(state.TypeMappingsJson, typeMappingsJson, StringComparison.Ordinal))
+        {
+            state.TypeMappingsJson = typeMappingsJson;
+            state.TypeMappings = ParseTypeMappings(typeMappingsJson);
+        }
+
+        var referencesJson = model.FindAnnotation(ReferencesAnnotation)?.Value as string;
+        if (!string.Equals(state.ReferencesJson, referencesJson, StringComparison.Ordinal))
+        {
+            state.ReferencesJson = referencesJson;
+            state.References = ParseReferences(referencesJson);
+            state.ReferencesByDependent = state.References.ToDictionary(
+                reference => (reference.DependentType, reference.RelationshipName),
+                reference => reference);
+            state.InverseAssociations = state.References
+                .SelectMany(reference => reference.Associations.Select(association => new ReferenceAssociation(reference, association)))
+                .GroupBy(item => (item.Reference.DependentType, item.Association.InverseRelationshipName, item.Association.Multiplicity))
+                .ToDictionary(group => group.Key, group => group.ToList());
+        }
+
+        var manyToManyJson = model.FindAnnotation(ManyToManyAnnotation)?.Value as string;
+        if (!string.Equals(state.ManyToManyJson, manyToManyJson, StringComparison.Ordinal))
+        {
+            state.ManyToManyJson = manyToManyJson;
+            state.ManyToManyRelations = ParseManyToManyRelations(manyToManyJson);
+            state.ManyToManyByRelationship = state.ManyToManyRelations
+                .GroupBy(relation => relation.RelationshipName, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+            state.ManyToManyByInverseRelationship = state.ManyToManyRelations
+                .GroupBy(relation => relation.InverseRelationshipName, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+        }
     }
 
     private static List<MorphTypeMapping> ParseTypeMappings(string? json)
@@ -175,9 +276,8 @@ internal static class PolymorphicModelMetadata
 
     public static MorphReference GetRequiredReference(IReadOnlyModel model, Type dependentType, string relationshipName)
     {
-        return GetReferences(model)
-            .FirstOrDefault(reference => reference.DependentType == dependentType
-                && string.Equals(reference.RelationshipName, relationshipName, StringComparison.Ordinal))
+        var state = GetCachedState(model);
+        return state.ReferencesByDependent.GetValueOrDefault((dependentType, relationshipName))
             ?? throw new InvalidOperationException($"No morphTo relationship named '{relationshipName}' is registered for '{dependentType.Name}'.");
     }
 
@@ -188,16 +288,15 @@ internal static class PolymorphicModelMetadata
         string inverseRelationshipName,
         MorphMultiplicity multiplicity)
     {
-        foreach (var reference in GetReferences(model).Where(reference => reference.DependentType == dependentType))
+        var state = GetCachedState(model);
+        if (state.InverseAssociations.TryGetValue((dependentType, inverseRelationshipName, multiplicity), out var candidates))
         {
-            var association = reference.Associations.FirstOrDefault(candidate =>
-                candidate.Multiplicity == multiplicity
-                && string.Equals(candidate.InverseRelationshipName, inverseRelationshipName, StringComparison.Ordinal)
-                && candidate.PrincipalType.IsAssignableFrom(principalType));
-
-            if (association is not null)
+            foreach (var candidate in candidates)
             {
-                return (reference, association);
+                if (candidate.Association.PrincipalType.IsAssignableFrom(principalType))
+                {
+                    return (candidate.Reference, candidate.Association);
+                }
             }
         }
 
@@ -206,20 +305,36 @@ internal static class PolymorphicModelMetadata
 
     public static MorphManyToManyRelation GetRequiredManyToMany(IReadOnlyModel model, Type principalType, Type relatedType, string relationshipName)
     {
-        return GetManyToManyRelations(model)
-            .FirstOrDefault(relation => relation.PrincipalType.IsAssignableFrom(principalType)
-                && relation.RelatedType.IsAssignableFrom(relatedType)
-                && string.Equals(relation.RelationshipName, relationshipName, StringComparison.Ordinal))
-            ?? throw new InvalidOperationException($"No morphToMany relationship named '{relationshipName}' is registered between '{principalType.Name}' and '{relatedType.Name}'.");
+        var state = GetCachedState(model);
+        if (state.ManyToManyByRelationship.TryGetValue(relationshipName, out var relations))
+        {
+            var match = relations.FirstOrDefault(relation => relation.PrincipalType.IsAssignableFrom(principalType)
+                && relation.RelatedType.IsAssignableFrom(relatedType));
+
+            if (match is not null)
+            {
+                return match;
+            }
+        }
+
+        throw new InvalidOperationException($"No morphToMany relationship named '{relationshipName}' is registered between '{principalType.Name}' and '{relatedType.Name}'.");
     }
 
     public static MorphManyToManyRelation GetRequiredMorphedByMany(IReadOnlyModel model, Type relatedType, Type principalType, string inverseRelationshipName)
     {
-        return GetManyToManyRelations(model)
-            .FirstOrDefault(relation => relation.RelatedType.IsAssignableFrom(relatedType)
-                && relation.PrincipalType.IsAssignableFrom(principalType)
-                && string.Equals(relation.InverseRelationshipName, inverseRelationshipName, StringComparison.Ordinal))
-            ?? throw new InvalidOperationException($"No morphedByMany relationship named '{inverseRelationshipName}' is registered between '{relatedType.Name}' and '{principalType.Name}'.");
+        var state = GetCachedState(model);
+        if (state.ManyToManyByInverseRelationship.TryGetValue(inverseRelationshipName, out var relations))
+        {
+            var match = relations.FirstOrDefault(relation => relation.RelatedType.IsAssignableFrom(relatedType)
+                && relation.PrincipalType.IsAssignableFrom(principalType));
+
+            if (match is not null)
+            {
+                return match;
+            }
+        }
+
+        throw new InvalidOperationException($"No morphedByMany relationship named '{inverseRelationshipName}' is registered between '{relatedType.Name}' and '{principalType.Name}'.");
     }
 
     internal sealed class MorphTypeMapping
@@ -396,6 +511,31 @@ internal static class PolymorphicModelMetadata
         string RelatedKeyType,
         string PrincipalAlias,
         PolymorphicDeleteBehavior DeleteBehavior);
+
+    private sealed class CachedState
+    {
+        public string? TypeMappingsJson { get; set; }
+
+        public List<MorphTypeMapping> TypeMappings { get; set; } = new();
+
+        public string? ReferencesJson { get; set; }
+
+        public List<MorphReference> References { get; set; } = new();
+
+        public Dictionary<(Type DependentType, string RelationshipName), MorphReference> ReferencesByDependent { get; set; } = new();
+
+        public Dictionary<(Type DependentType, string InverseRelationshipName, MorphMultiplicity Multiplicity), List<ReferenceAssociation>> InverseAssociations { get; set; } = new();
+
+        public string? ManyToManyJson { get; set; }
+
+        public List<MorphManyToManyRelation> ManyToManyRelations { get; set; } = new();
+
+        public Dictionary<string, List<MorphManyToManyRelation>> ManyToManyByRelationship { get; set; } = new(StringComparer.Ordinal);
+
+        public Dictionary<string, List<MorphManyToManyRelation>> ManyToManyByInverseRelationship { get; set; } = new(StringComparer.Ordinal);
+    }
+
+    private sealed record ReferenceAssociation(MorphReference Reference, MorphAssociation Association);
 }
 
 
