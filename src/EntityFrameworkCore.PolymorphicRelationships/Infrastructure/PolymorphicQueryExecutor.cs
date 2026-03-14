@@ -1,4 +1,3 @@
-﻿using System.Linq.Expressions;
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 
@@ -227,17 +226,17 @@ internal static class PolymorphicQueryExecutor
     private static object? SingleOrDefaultByPropertyCore<TEntity, TProperty>(DbContext dbContext, string propertyName, object propertyValue)
         where TEntity : class
     {
-        var typedValue = (TProperty?)PolymorphicValueConverter.ConvertForAssignment(propertyValue, typeof(TProperty));
-        var predicate = BuildEqualsExpression<TEntity, TProperty>(propertyName, typedValue);
-        return dbContext.Set<TEntity>().SingleOrDefault(predicate);
+        return PolymorphicQueryableLoader
+            .WherePropertyEquals(dbContext.Set<TEntity>(), propertyName, typeof(TProperty), propertyValue)
+            .SingleOrDefault();
     }
 
     private static async Task<object?> SingleOrDefaultByPropertyCoreAsync<TEntity, TProperty>(DbContext dbContext, string propertyName, object propertyValue, CancellationToken cancellationToken)
         where TEntity : class
     {
-        var typedValue = (TProperty?)PolymorphicValueConverter.ConvertForAssignment(propertyValue, typeof(TProperty));
-        var predicate = BuildEqualsExpression<TEntity, TProperty>(propertyName, typedValue);
-        return await dbContext.Set<TEntity>().SingleOrDefaultAsync(predicate, cancellationToken);
+        return await PolymorphicQueryableLoader
+            .WherePropertyEquals(dbContext.Set<TEntity>(), propertyName, typeof(TProperty), propertyValue)
+            .SingleOrDefaultAsync(cancellationToken);
     }
 
     private static object? SingleOrDefaultByTwoPropertiesCore<TEntity, TPropertyOne, TPropertyTwo>(
@@ -276,7 +275,7 @@ internal static class PolymorphicQueryExecutor
         where TEntity : class
     {
         var query = FilterByTwoProperties<TEntity, TPropertyOne, TPropertyTwo>(dbContext, firstPropertyName, firstPropertyValue, secondPropertyName, secondPropertyValue);
-        return ApplyOrdering<TEntity, TOrder>(query, orderPropertyName, descending).FirstOrDefault();
+        return PolymorphicQueryableLoader.OrderByProperty(query, orderPropertyName, typeof(TOrder), descending).FirstOrDefault();
     }
 
     private static async Task<object?> FirstOrDefaultByTwoPropertiesOrderedCoreAsync<TEntity, TPropertyOne, TPropertyTwo, TOrder>(
@@ -291,15 +290,13 @@ internal static class PolymorphicQueryExecutor
         where TEntity : class
     {
         var query = FilterByTwoProperties<TEntity, TPropertyOne, TPropertyTwo>(dbContext, firstPropertyName, firstPropertyValue, secondPropertyName, secondPropertyValue);
-        return await ApplyOrdering<TEntity, TOrder>(query, orderPropertyName, descending).FirstOrDefaultAsync(cancellationToken);
+        return await PolymorphicQueryableLoader.OrderByProperty(query, orderPropertyName, typeof(TOrder), descending).FirstOrDefaultAsync(cancellationToken);
     }
 
     private static IReadOnlyList<object> ListByPropertyCore<TEntity, TProperty>(DbContext dbContext, string propertyName, object propertyValue)
         where TEntity : class
     {
-        var typedValue = (TProperty?)PolymorphicValueConverter.ConvertForAssignment(propertyValue, typeof(TProperty));
-        return dbContext.Set<TEntity>()
-            .Where(BuildEqualsExpression<TEntity, TProperty>(propertyName, typedValue))
+        return PolymorphicQueryableLoader.WherePropertyEquals(dbContext.Set<TEntity>(), propertyName, typeof(TProperty), propertyValue)
             .Cast<object>()
             .ToList();
     }
@@ -307,9 +304,7 @@ internal static class PolymorphicQueryExecutor
     private static async Task<IReadOnlyList<object>> ListByPropertyCoreAsync<TEntity, TProperty>(DbContext dbContext, string propertyName, object propertyValue, CancellationToken cancellationToken)
         where TEntity : class
     {
-        var typedValue = (TProperty?)PolymorphicValueConverter.ConvertForAssignment(propertyValue, typeof(TProperty));
-        var entities = await dbContext.Set<TEntity>()
-            .Where(BuildEqualsExpression<TEntity, TProperty>(propertyName, typedValue))
+        var entities = await PolymorphicQueryableLoader.WherePropertyEquals(dbContext.Set<TEntity>(), propertyName, typeof(TProperty), propertyValue)
             .ToListAsync(cancellationToken);
 
         return entities.Cast<object>().ToList();
@@ -349,8 +344,7 @@ internal static class PolymorphicQueryExecutor
             return Array.Empty<object>();
         }
 
-        return dbContext.Set<TEntity>()
-            .Where(BuildContainsExpression<TEntity, TProperty>(propertyName, propertyValues))
+        return PolymorphicQueryableLoader.WherePropertyIn(dbContext.Set<TEntity>(), propertyName, typeof(TProperty), propertyValues)
             .Cast<object>()
             .ToList();
     }
@@ -363,8 +357,7 @@ internal static class PolymorphicQueryExecutor
             return Array.Empty<object>();
         }
 
-        var entities = await dbContext.Set<TEntity>()
-            .Where(BuildContainsExpression<TEntity, TProperty>(propertyName, propertyValues))
+        var entities = await PolymorphicQueryableLoader.WherePropertyIn(dbContext.Set<TEntity>(), propertyName, typeof(TProperty), propertyValues)
             .ToListAsync(cancellationToken);
 
         return entities.Cast<object>().ToList();
@@ -378,72 +371,17 @@ internal static class PolymorphicQueryExecutor
         object secondPropertyValue)
         where TEntity : class
     {
-        var firstTypedValue = (TPropertyOne?)PolymorphicValueConverter.ConvertForAssignment(firstPropertyValue, typeof(TPropertyOne));
-        var secondTypedValue = (TPropertyTwo?)PolymorphicValueConverter.ConvertForAssignment(secondPropertyValue, typeof(TPropertyTwo));
+        var query = PolymorphicQueryableLoader.WherePropertyEquals(
+            dbContext.Set<TEntity>(),
+            firstPropertyName,
+            typeof(TPropertyOne),
+            firstPropertyValue);
 
-        return dbContext.Set<TEntity>()
-            .Where(BuildEqualsExpression<TEntity, TPropertyOne>(firstPropertyName, firstTypedValue))
-            .Where(BuildEqualsExpression<TEntity, TPropertyTwo>(secondPropertyName, secondTypedValue));
-    }
-
-    private static IOrderedQueryable<TEntity> ApplyOrdering<TEntity, TProperty>(IQueryable<TEntity> query, string propertyName, bool descending)
-    {
-        var orderExpression = BuildPropertyAccessExpression<TEntity, TProperty>(propertyName);
-        return descending
-            ? query.OrderByDescending(orderExpression)
-            : query.OrderBy(orderExpression);
-    }
-
-    private static Expression<Func<TEntity, bool>> BuildEqualsExpression<TEntity, TProperty>(string propertyName, TProperty? propertyValue)
-    {
-        var parameter = Expression.Parameter(typeof(TEntity), "entity");
-        var property = Expression.Call(
-            typeof(EF),
-            nameof(EF.Property),
-            new[] { typeof(TProperty) },
-            parameter,
-            Expression.Constant(propertyName));
-
-        var equals = Expression.Equal(property, PolymorphicValueConverter.BuildTypedConstantExpression(propertyValue, typeof(TProperty)));
-        return Expression.Lambda<Func<TEntity, bool>>(equals, parameter);
-    }
-
-    private static Expression<Func<TEntity, bool>> BuildContainsExpression<TEntity, TProperty>(string propertyName, IEnumerable<object> propertyValues)
-    {
-        var typedValues = propertyValues
-            .Select(value => (TProperty?)PolymorphicValueConverter.ConvertForAssignment(value, typeof(TProperty)))
-            .Distinct()
-            .ToArray();
-
-        var parameter = Expression.Parameter(typeof(TEntity), "entity");
-        var property = Expression.Call(
-            typeof(EF),
-            nameof(EF.Property),
-            new[] { typeof(TProperty) },
-            parameter,
-            Expression.Constant(propertyName));
-
-        var contains = Expression.Call(
-            typeof(Enumerable),
-            nameof(Enumerable.Contains),
-            new[] { typeof(TProperty) },
-            Expression.Constant(typedValues),
-            property);
-
-        return Expression.Lambda<Func<TEntity, bool>>(contains, parameter);
-    }
-
-    private static Expression<Func<TEntity, TProperty>> BuildPropertyAccessExpression<TEntity, TProperty>(string propertyName)
-    {
-        var parameter = Expression.Parameter(typeof(TEntity), "entity");
-        var property = Expression.Call(
-            typeof(EF),
-            nameof(EF.Property),
-            new[] { typeof(TProperty) },
-            parameter,
-            Expression.Constant(propertyName));
-
-        return Expression.Lambda<Func<TEntity, TProperty>>(property, parameter);
+        return PolymorphicQueryableLoader.WherePropertyEquals(
+            query,
+            secondPropertyName,
+            typeof(TPropertyTwo),
+            secondPropertyValue);
     }
 }
 

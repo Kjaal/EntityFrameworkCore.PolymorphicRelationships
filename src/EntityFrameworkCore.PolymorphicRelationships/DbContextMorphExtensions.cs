@@ -1,4 +1,3 @@
-using System.Collections;
 using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
@@ -132,7 +131,7 @@ public static class DbContextMorphExtensions
 
         var keyPropertyType = GetPropertyType(dbContext, association.PrincipalType, association.PrincipalKeyPropertyName);
         var query = ApplyQueryTransform(dbContext.Set<TPrincipal>().AsQueryable(), queryTransform);
-        query = WherePropertyEquals(query, association.PrincipalKeyPropertyName, keyPropertyType, ownerId);
+        query = PolymorphicQueryableLoader.WherePropertyEquals(query, association.PrincipalKeyPropertyName, keyPropertyType, ownerId);
 
         var entity = await query.SingleOrDefaultAsync(cancellationToken);
         AssignProperty(dependent, relationshipName, entity);
@@ -217,13 +216,13 @@ public static class DbContextMorphExtensions
                 cancellationToken);
 
             var ownersById = owners.ToDictionary(
-                owner => CreateLookupKey(GetPropertyValueViaEntry(dbContext, owner, association.PrincipalKeyPropertyName)),
+                owner => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, owner, association.PrincipalKeyPropertyName), keyPropertyType),
                 owner => owner,
-                StringComparer.Ordinal);
+                EqualityComparer<object>.Default);
 
             foreach (var item in aliasGroup)
             {
-                var owner = ownersById.GetValueOrDefault(CreateLookupKey(PolymorphicValueConverter.ConvertForAssignment(item.OwnerId, keyPropertyType)));
+                var owner = ownersById.GetValueOrDefault(NormalizeLookupKey(item.OwnerId, keyPropertyType));
                 AssignProperty(item.Dependent!, relationshipName, owner);
                 results[item.Dependent!] = owner;
             }
@@ -314,8 +313,8 @@ public static class DbContextMorphExtensions
         }
 
         var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
-        query = WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
-        query = WherePropertyEquals(query, reference.IdPropertyName, reference.IdPropertyType, ownerId);
+        query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
+        query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.IdPropertyName, reference.IdPropertyType, ownerId);
 
         var typedDependents = await query.ToListAsync(cancellationToken);
         AssignProperty(principal, inverseRelationshipName, typedDependents);
@@ -375,23 +374,23 @@ public static class DbContextMorphExtensions
             .ToArray();
 
         var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
-        query = WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
-        query = WherePropertyIn(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds);
+        query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
+        query = PolymorphicQueryableLoader.WherePropertyIn(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds);
 
         var dependents = await query.ToListAsync(cancellationToken);
 
         var groupedDependents = dependents
-            .GroupBy(dependent => CreateLookupKey(GetPropertyValueViaEntry(dbContext, dependent, reference.IdPropertyName)), StringComparer.Ordinal)
+            .GroupBy(dependent => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, dependent, reference.IdPropertyName), reference.IdPropertyType), EqualityComparer<object>.Default)
             .ToDictionary(
                 group => group.Key,
                 group => (IReadOnlyList<TDependent>)group.ToList(),
-                StringComparer.Ordinal);
+                EqualityComparer<object>.Default);
 
         foreach (var item in principalIds)
         {
             var value = item.OwnerId is null
                 ? Array.Empty<TDependent>()
-                : groupedDependents.GetValueOrDefault(CreateLookupKey(PolymorphicValueConverter.ConvertForAssignment(item.OwnerId, reference.IdPropertyType))) ?? Array.Empty<TDependent>();
+                : groupedDependents.GetValueOrDefault(NormalizeLookupKey(item.OwnerId, reference.IdPropertyType)) ?? Array.Empty<TDependent>();
 
             AssignProperty(item.Principal!, inverseRelationshipName, value);
             results[item.Principal!] = value;
@@ -677,7 +676,7 @@ public static class DbContextMorphExtensions
         }
 
         var query = ApplyQueryTransform(dbContext.Set<TRelated>().AsQueryable(), queryTransform);
-        query = WherePropertyIn(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds);
+        query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds);
 
         var typedRelatedEntities = await query.ToListAsync(cancellationToken);
         AssignProperty(principal, relationshipName, typedRelatedEntities);
@@ -751,28 +750,28 @@ public static class DbContextMorphExtensions
             .ToArray();
 
         var query = ApplyQueryTransform(dbContext.Set<TRelated>().AsQueryable(), queryTransform);
-        query = WherePropertyIn(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds);
+        query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds);
         var relatedEntities = await query.ToListAsync(cancellationToken);
 
         var relatedLookup = relatedEntities.ToDictionary(
-            related => CreateLookupKey(GetPropertyValueViaEntry(dbContext, related!, relation.RelatedKeyPropertyName)),
+            related => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, related!, relation.RelatedKeyPropertyName), relation.RelatedKeyType),
             related => related,
-            StringComparer.Ordinal);
+            EqualityComparer<object>.Default);
 
         var groupedPivots = filteredPivots
-            .GroupBy(pivot => CreateLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotIdPropertyName)), StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+            .GroupBy(pivot => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotIdPropertyName), relation.PivotIdPropertyType), EqualityComparer<object>.Default)
+            .ToDictionary(group => group.Key, group => group.ToList(), EqualityComparer<object>.Default);
 
         foreach (var item in principalIds)
         {
             var ownerKey = item.OwnerId is null
                 ? null
-                : CreateLookupKey(PolymorphicValueConverter.ConvertForAssignment(item.OwnerId, relation.PivotIdPropertyType));
+                : NormalizeLookupKey(item.OwnerId, relation.PivotIdPropertyType);
 
             IReadOnlyList<TRelated> relatedValues = ownerKey is null || !groupedPivots.TryGetValue(ownerKey, out var ownerPivots)
                 ? Array.Empty<TRelated>()
                 : ownerPivots
-                    .Select(pivot => relatedLookup.GetValueOrDefault(CreateLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotRelatedIdPropertyName))))
+                    .Select(pivot => relatedLookup.GetValueOrDefault(NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotRelatedIdPropertyName), relation.RelatedKeyType)))
                     .Where(related => related is not null)
                     .Distinct()
                     .Cast<TRelated>()
@@ -844,7 +843,7 @@ public static class DbContextMorphExtensions
         }
 
         var query = ApplyQueryTransform(dbContext.Set<TPrincipal>().AsQueryable(), queryTransform);
-        query = WherePropertyIn(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds);
+        query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds);
         var typedPrincipals = await query.ToListAsync(cancellationToken);
         AssignProperty(related, inverseRelationshipName, typedPrincipals);
         return typedPrincipals;
@@ -917,28 +916,28 @@ public static class DbContextMorphExtensions
             .ToArray();
 
         var query = ApplyQueryTransform(dbContext.Set<TPrincipal>().AsQueryable(), queryTransform);
-        query = WherePropertyIn(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds);
+        query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds);
         var principals = await query.ToListAsync(cancellationToken);
 
         var principalLookup = principals.ToDictionary(
-            principal => CreateLookupKey(GetPropertyValueViaEntry(dbContext, principal!, relation.PrincipalKeyPropertyName)),
+            principal => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, principal!, relation.PrincipalKeyPropertyName), relation.PrincipalKeyType),
             principal => principal,
-            StringComparer.Ordinal);
+            EqualityComparer<object>.Default);
 
         var groupedPivots = filteredPivots
-            .GroupBy(pivot => CreateLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotRelatedIdPropertyName)), StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+            .GroupBy(pivot => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotRelatedIdPropertyName), relation.PivotRelatedIdPropertyType), EqualityComparer<object>.Default)
+            .ToDictionary(group => group.Key, group => group.ToList(), EqualityComparer<object>.Default);
 
         foreach (var item in relatedIds)
         {
             var relatedKey = item.RelatedId is null
                 ? null
-                : CreateLookupKey(PolymorphicValueConverter.ConvertForAssignment(item.RelatedId, relation.PivotRelatedIdPropertyType));
+                : NormalizeLookupKey(item.RelatedId, relation.PivotRelatedIdPropertyType);
 
             IReadOnlyList<TPrincipal> owners = relatedKey is null || !groupedPivots.TryGetValue(relatedKey, out var entityPivots)
                 ? Array.Empty<TPrincipal>()
                 : entityPivots
-                    .Select(pivot => principalLookup.GetValueOrDefault(CreateLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotIdPropertyName))))
+                    .Select(pivot => principalLookup.GetValueOrDefault(NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, pivot, relation.PivotIdPropertyName), relation.PrincipalKeyType)))
                     .Where(principal => principal is not null)
                     .Distinct()
                     .Cast<TPrincipal>()
@@ -1013,69 +1012,6 @@ public static class DbContextMorphExtensions
         return queryTransform is null ? query : queryTransform(query);
     }
 
-    private static IQueryable<TEntity> WherePropertyEquals<TEntity>(
-        IQueryable<TEntity> query,
-        string propertyName,
-        Type propertyType,
-        object? value)
-        where TEntity : class
-    {
-        var parameter = Expression.Parameter(typeof(TEntity), "entity");
-        var property = Expression.Call(
-            typeof(EF),
-            nameof(EF.Property),
-            new[] { propertyType },
-            parameter,
-            Expression.Constant(propertyName));
-
-        var equals = Expression.Equal(property, PolymorphicValueConverter.BuildTypedConstantExpression(value, propertyType));
-        var predicate = Expression.Lambda<Func<TEntity, bool>>(equals, parameter);
-        return query.Where(predicate);
-    }
-
-    private static IQueryable<TEntity> WherePropertyIn<TEntity>(
-        IQueryable<TEntity> query,
-        string propertyName,
-        Type propertyType,
-        IEnumerable<object> values)
-        where TEntity : class
-    {
-        var convertedValues = values
-            .Select(value => PolymorphicValueConverter.ConvertForAssignment(value, propertyType))
-            .Where(value => value is not null)
-            .Distinct()
-            .ToArray();
-
-        if (convertedValues.Length == 0)
-        {
-            return query.Where(_ => false);
-        }
-
-        var typedArray = Array.CreateInstance(propertyType, convertedValues.Length);
-        for (var index = 0; index < convertedValues.Length; index++)
-        {
-            typedArray.SetValue(convertedValues[index], index);
-        }
-
-        var parameter = Expression.Parameter(typeof(TEntity), "entity");
-        var property = Expression.Call(
-            typeof(EF),
-            nameof(EF.Property),
-            new[] { propertyType },
-            parameter,
-            Expression.Constant(propertyName));
-
-        var contains = Expression.Call(
-            typeof(Enumerable),
-            nameof(Enumerable.Contains),
-            new[] { propertyType },
-            Expression.Constant(typedArray, propertyType.MakeArrayType()),
-            property);
-
-        var predicate = Expression.Lambda<Func<TEntity, bool>>(contains, parameter);
-        return query.Where(predicate);
-    }
-
     private static object? GetEntityKeyValueOrNull(DbContext dbContext, object entity, string propertyName)
     {
         return PolymorphicMemberAccessorCache.GetValue(dbContext, entity, propertyName);
@@ -1086,9 +1022,10 @@ public static class DbContextMorphExtensions
         return PolymorphicMemberAccessorCache.GetValue(dbContext, entity, propertyName);
     }
 
-    private static string CreateLookupKey(object? value)
+    private static object NormalizeLookupKey(object? value, Type keyType)
     {
-        return value?.ToString() ?? string.Empty;
+        return PolymorphicValueConverter.ConvertForAssignment(value, keyType)
+            ?? throw new InvalidOperationException($"A lookup key value for '{keyType.Name}' was null.");
     }
 
     private static void AssignProperty(object target, string propertyName, object? value)

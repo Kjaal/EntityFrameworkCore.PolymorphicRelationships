@@ -1,10 +1,20 @@
-﻿using System.Linq.Expressions;
+using System.Linq.Expressions;
+using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 internal static class PolymorphicQueryableLoader
 {
+    private static readonly MethodInfo WherePropertyEqualsMethod = typeof(PolymorphicQueryableLoader)
+        .GetMethod(nameof(WherePropertyEqualsCore), BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    private static readonly MethodInfo WherePropertyInMethod = typeof(PolymorphicQueryableLoader)
+        .GetMethod(nameof(WherePropertyInCore), BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    private static readonly MethodInfo OrderByPropertyMethod = typeof(PolymorphicQueryableLoader)
+        .GetMethod(nameof(OrderByPropertyCore), BindingFlags.NonPublic | BindingFlags.Static)!;
+
     public static async Task<IReadOnlyList<object>> ListByPropertyValuesAsync<TEntity>(
         IQueryable<TEntity> query,
         string propertyName,
@@ -30,24 +40,97 @@ internal static class PolymorphicQueryableLoader
             typedArray.SetValue(convertedValues[index], index);
         }
 
+        var entities = await WherePropertyIn(query, propertyName, propertyType, convertedValues).ToListAsync(cancellationToken);
+        return entities.Cast<object>().ToList();
+    }
+
+    public static IQueryable<TEntity> WherePropertyEquals<TEntity>(
+        IQueryable<TEntity> query,
+        string propertyName,
+        Type propertyType,
+        object? value)
+        where TEntity : class
+    {
+        return (IQueryable<TEntity>)WherePropertyEqualsMethod
+            .MakeGenericMethod(typeof(TEntity), propertyType)
+            .Invoke(null, new object?[] { query, propertyName, value })!;
+    }
+
+    public static IQueryable<TEntity> WherePropertyIn<TEntity>(
+        IQueryable<TEntity> query,
+        string propertyName,
+        Type propertyType,
+        IEnumerable<object?> values)
+        where TEntity : class
+    {
+        return (IQueryable<TEntity>)WherePropertyInMethod
+            .MakeGenericMethod(typeof(TEntity), propertyType)
+            .Invoke(null, new object?[] { query, propertyName, values.ToArray() })!;
+    }
+
+    public static IOrderedQueryable<TEntity> OrderByProperty<TEntity>(
+        IQueryable<TEntity> query,
+        string propertyName,
+        Type propertyType,
+        bool descending)
+        where TEntity : class
+    {
+        return (IOrderedQueryable<TEntity>)OrderByPropertyMethod
+            .MakeGenericMethod(typeof(TEntity), propertyType)
+            .Invoke(null, new object?[] { query, propertyName, descending })!;
+    }
+
+    private static IQueryable<TEntity> WherePropertyEqualsCore<TEntity, TProperty>(
+        IQueryable<TEntity> query,
+        string propertyName,
+        object? value)
+        where TEntity : class
+    {
+        var typedValue = (TProperty?)PolymorphicValueConverter.ConvertForAssignment(value, typeof(TProperty));
+
         var parameter = Expression.Parameter(typeof(TEntity), "entity");
         var property = Expression.Call(
             typeof(EF),
             nameof(EF.Property),
-            new[] { propertyType },
+            new[] { typeof(TProperty) },
             parameter,
             Expression.Constant(propertyName));
 
-        var contains = Expression.Call(
-            typeof(Enumerable),
-            nameof(Enumerable.Contains),
-            new[] { propertyType },
-            Expression.Constant(typedArray, propertyType.MakeArrayType()),
-            property);
+        var equals = Expression.Equal(property, PolymorphicValueConverter.BuildTypedConstantExpression(typedValue, typeof(TProperty)));
+        var predicate = Expression.Lambda<Func<TEntity, bool>>(equals, parameter);
+        return query.Where(predicate);
+    }
 
-        var predicate = Expression.Lambda<Func<TEntity, bool>>(contains, parameter);
-        var entities = await query.Where(predicate).ToListAsync(cancellationToken);
-        return entities.Cast<object>().ToList();
+    private static IQueryable<TEntity> WherePropertyInCore<TEntity, TProperty>(
+        IQueryable<TEntity> query,
+        string propertyName,
+        object[] values)
+        where TEntity : class
+    {
+        var typedValues = values
+            .Select(value => (TProperty?)PolymorphicValueConverter.ConvertForAssignment(value, typeof(TProperty)))
+            .Where(value => value is not null)
+            .Cast<TProperty>()
+            .Distinct()
+            .ToArray();
+
+        if (typedValues.Length == 0)
+        {
+            return query.Where(_ => false);
+        }
+
+        return query.Where(entity => typedValues.Contains(EF.Property<TProperty>(entity, propertyName)));
+    }
+
+    private static IOrderedQueryable<TEntity> OrderByPropertyCore<TEntity, TProperty>(
+        IQueryable<TEntity> query,
+        string propertyName,
+        bool descending)
+        where TEntity : class
+    {
+        return descending
+            ? query.OrderByDescending(entity => EF.Property<TProperty>(entity, propertyName))
+            : query.OrderBy(entity => EF.Property<TProperty>(entity, propertyName));
     }
 }
 
