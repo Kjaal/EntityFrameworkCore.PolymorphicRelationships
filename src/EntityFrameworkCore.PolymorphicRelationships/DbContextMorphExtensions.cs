@@ -97,6 +97,17 @@ public static class DbContextMorphExtensions
         return await dbContext.LoadMorphAsync<TDependent, TPrincipal>(dependent, relationshipName, queryTransform: null, cancellationToken);
     }
 
+    public static Task<TPrincipal?> LoadMorphUntrackedAsync<TDependent, TPrincipal>(
+        this DbContext dbContext,
+        TDependent dependent,
+        string relationshipName,
+        CancellationToken cancellationToken = default)
+        where TDependent : class
+        where TPrincipal : class
+    {
+        return dbContext.LoadMorphAsync<TDependent, TPrincipal>(dependent, relationshipName, query => query.AsNoTracking(), cancellationToken);
+    }
+
     public static async Task<TPrincipal?> LoadMorphAsync<TDependent, TPrincipal>(
         this DbContext dbContext,
         TDependent dependent,
@@ -156,13 +167,46 @@ public static class DbContextMorphExtensions
         CancellationToken cancellationToken = default)
         where TDependent : class
     {
+        return await LoadMorphsCoreAsync(dbContext, dependents, relationshipName, configure, asNoTracking: false, cancellationToken);
+    }
+
+    public static async Task<IReadOnlyDictionary<TDependent, object?>> LoadMorphsUntrackedAsync<TDependent>(
+        this DbContext dbContext,
+        IEnumerable<TDependent> dependents,
+        string relationshipName,
+        CancellationToken cancellationToken = default)
+        where TDependent : class
+    {
+        return await LoadMorphsCoreAsync(dbContext, dependents, relationshipName, configure: null, asNoTracking: true, cancellationToken);
+    }
+
+    public static async Task<IReadOnlyDictionary<TDependent, object?>> LoadMorphsUntrackedAsync<TDependent>(
+        this DbContext dbContext,
+        IEnumerable<TDependent> dependents,
+        string relationshipName,
+        Action<MorphBatchLoadPlan<TDependent>>? configure,
+        CancellationToken cancellationToken = default)
+        where TDependent : class
+    {
+        return await LoadMorphsCoreAsync(dbContext, dependents, relationshipName, configure, asNoTracking: true, cancellationToken);
+    }
+
+    private static async Task<IReadOnlyDictionary<TDependent, object?>> LoadMorphsCoreAsync<TDependent>(
+        DbContext dbContext,
+        IEnumerable<TDependent> dependents,
+        string relationshipName,
+        Action<MorphBatchLoadPlan<TDependent>>? configure,
+        bool asNoTracking,
+        CancellationToken cancellationToken)
+        where TDependent : class
+    {
         ArgumentNullException.ThrowIfNull(dbContext);
         ArgumentNullException.ThrowIfNull(dependents);
 
         MorphBatchLoadPlan<TDependent>? batchLoadPlan = null;
         if (configure is not null)
         {
-            batchLoadPlan = new MorphBatchLoadPlan<TDependent>();
+            batchLoadPlan = new MorphBatchLoadPlan<TDependent>(asNoTracking);
             configure(batchLoadPlan);
         }
 
@@ -215,6 +259,7 @@ public static class DbContextMorphExtensions
                 association,
                 ownerIds,
                 batchLoadPlan,
+                asNoTracking,
                 cancellationToken);
 
             var ownersById = owners.ToDictionary(
@@ -286,6 +331,17 @@ public static class DbContextMorphExtensions
         return await dbContext.LoadMorphManyAsync<TPrincipal, TDependent>(principal, inverseRelationshipName, queryTransform: null, cancellationToken);
     }
 
+    public static Task<IReadOnlyList<TDependent>> LoadMorphManyUntrackedAsync<TPrincipal, TDependent>(
+        this DbContext dbContext,
+        TPrincipal principal,
+        string inverseRelationshipName,
+        CancellationToken cancellationToken = default)
+        where TPrincipal : class
+        where TDependent : class
+    {
+        return dbContext.LoadMorphManyAsync<TPrincipal, TDependent>(principal, inverseRelationshipName, query => query.AsNoTracking(), cancellationToken);
+    }
+
     public static async Task<IReadOnlyList<TDependent>> LoadMorphManyAsync<TPrincipal, TDependent>(
         this DbContext dbContext,
         TPrincipal principal,
@@ -332,6 +388,114 @@ public static class DbContextMorphExtensions
         where TDependent : class
     {
         return await dbContext.LoadMorphManyAsync<TPrincipal, TDependent>(principals, inverseRelationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static Task<IReadOnlyDictionary<TPrincipal, IReadOnlyList<TDependent>>> LoadMorphManyUntrackedAsync<TPrincipal, TDependent>(
+        this DbContext dbContext,
+        IEnumerable<TPrincipal> principals,
+        string inverseRelationshipName,
+        CancellationToken cancellationToken = default)
+        where TPrincipal : class
+        where TDependent : class
+    {
+        return dbContext.LoadMorphManyAsync<TPrincipal, TDependent>(principals, inverseRelationshipName, query => query.AsNoTracking(), cancellationToken);
+    }
+
+    public static async Task<IReadOnlyDictionary<object, IReadOnlyList<TDependent>>> LoadMorphManyAcrossAsync<TDependent>(
+        this DbContext dbContext,
+        IEnumerable<object> principals,
+        string inverseRelationshipName,
+        CancellationToken cancellationToken = default)
+        where TDependent : class
+    {
+        return await dbContext.LoadMorphManyAcrossAsync<TDependent>(principals, inverseRelationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static async Task<IReadOnlyDictionary<object, IReadOnlyList<TDependent>>> LoadMorphManyAcrossAsync<TDependent>(
+        this DbContext dbContext,
+        IEnumerable<object> principals,
+        string inverseRelationshipName,
+        Func<IQueryable<TDependent>, IQueryable<TDependent>>? queryTransform,
+        CancellationToken cancellationToken = default)
+        where TDependent : class
+    {
+        ArgumentNullException.ThrowIfNull(dbContext);
+        ArgumentNullException.ThrowIfNull(principals);
+
+        var principalList = CollectDistinctObjects(principals);
+        var results = new Dictionary<object, IReadOnlyList<TDependent>>(principalList.Count);
+
+        if (principalList.Count == 0)
+        {
+            return results;
+        }
+
+        foreach (var principalGroup in principalList.GroupBy(principal => principal.GetType()))
+        {
+            var (reference, association) = PolymorphicModelMetadata.GetRequiredInverse(
+                dbContext.Model,
+                principalGroup.Key,
+                typeof(TDependent),
+                inverseRelationshipName,
+                MorphMultiplicity.Many);
+
+            var principalIds = new List<EntityKeyState<object>>();
+            var ownerIds = new HashSet<object>(EqualityComparer<object>.Default);
+
+            foreach (var principal in principalGroup)
+            {
+                var ownerId = GetEntityKeyValueOrNull(dbContext, principal, association.PrincipalKeyPropertyName);
+                principalIds.Add(new EntityKeyState<object>(principal, ownerId));
+
+                if (ownerId is not null)
+                {
+                    ownerIds.Add(NormalizeLookupKey(ownerId, reference.IdPropertyType));
+                }
+            }
+
+            var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
+            query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
+            query = PolymorphicQueryableLoader.WherePropertyIn(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds);
+
+            var dependents = await query.ToListAsync(cancellationToken);
+            var groupedDependents = new Dictionary<object, List<TDependent>>(EqualityComparer<object>.Default);
+
+            foreach (var dependent in dependents)
+            {
+                var key = NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, dependent, reference.IdPropertyName), reference.IdPropertyType);
+                if (!groupedDependents.TryGetValue(key, out var items))
+                {
+                    items = new List<TDependent>();
+                    groupedDependents.Add(key, items);
+                }
+
+                items.Add(dependent);
+            }
+
+            foreach (var item in principalIds)
+            {
+                IReadOnlyList<TDependent> value = item.OwnerId is null
+                    ? Array.Empty<TDependent>()
+                    : groupedDependents.TryGetValue(NormalizeLookupKey(item.OwnerId, reference.IdPropertyType), out var items)
+                        ? items
+                        : Array.Empty<TDependent>();
+
+                AssignProperty(item.Entity, inverseRelationshipName, value);
+                results[item.Entity] = value;
+            }
+        }
+
+        return results;
+    }
+
+    public static Task<IReadOnlyDictionary<object, IReadOnlyList<TDependent>>> LoadMorphManyAcrossUntrackedAsync<TDependent>(
+        this DbContext dbContext,
+        IEnumerable<object> principals,
+        string inverseRelationshipName,
+        CancellationToken cancellationToken = default)
+        where TDependent : class
+    {
+        return dbContext.LoadMorphManyAcrossAsync<TDependent>(principals, inverseRelationshipName, query => query.AsNoTracking(), cancellationToken);
     }
 
     public static async Task<IReadOnlyDictionary<TPrincipal, IReadOnlyList<TDependent>>> LoadMorphManyAsync<TPrincipal, TDependent>(
@@ -419,7 +583,7 @@ public static class DbContextMorphExtensions
         where TPrincipal : class
         where TDependent : class
     {
-        return dbContext.LoadMorphOneOfManyAsync(principal, inverseRelationshipName, orderBy, MorphOneOfManyAggregate.Max, assignToPropertyName, cancellationToken);
+        return dbContext.LoadMorphOneOfManyAsync(principal, inverseRelationshipName, orderBy, MorphOneOfManyAggregate.Max, assignToPropertyName, queryTransform: null, cancellationToken);
     }
 
     public static Task<TDependent?> LoadMorphOldestOfManyAsync<TPrincipal, TDependent, TOrder>(
@@ -432,7 +596,20 @@ public static class DbContextMorphExtensions
         where TPrincipal : class
         where TDependent : class
     {
-        return dbContext.LoadMorphOneOfManyAsync(principal, inverseRelationshipName, orderBy, MorphOneOfManyAggregate.Min, assignToPropertyName, cancellationToken);
+        return dbContext.LoadMorphOneOfManyAsync(principal, inverseRelationshipName, orderBy, MorphOneOfManyAggregate.Min, assignToPropertyName, queryTransform: null, cancellationToken);
+    }
+
+    public static Task<TDependent?> LoadMorphLatestOfManyUntrackedAsync<TPrincipal, TDependent, TOrder>(
+        this DbContext dbContext,
+        TPrincipal principal,
+        string inverseRelationshipName,
+        Expression<Func<TDependent, TOrder>> orderBy,
+        string? assignToPropertyName = null,
+        CancellationToken cancellationToken = default)
+        where TPrincipal : class
+        where TDependent : class
+    {
+        return dbContext.LoadMorphOneOfManyAsync(principal, inverseRelationshipName, orderBy, MorphOneOfManyAggregate.Max, assignToPropertyName, query => query.AsNoTracking(), cancellationToken);
     }
 
     public static async Task<TDependent?> LoadMorphOneOfManyAsync<TPrincipal, TDependent, TOrder>(
@@ -442,6 +619,7 @@ public static class DbContextMorphExtensions
         Expression<Func<TDependent, TOrder>> orderBy,
         MorphOneOfManyAggregate aggregate,
         string? assignToPropertyName = null,
+        Func<IQueryable<TDependent>, IQueryable<TDependent>>? queryTransform = null,
         CancellationToken cancellationToken = default)
         where TPrincipal : class
         where TDependent : class
@@ -466,19 +644,12 @@ public static class DbContextMorphExtensions
 
         var orderPropertyName = ExpressionHelpers.GetPropertyName(orderBy);
         var orderPropertyType = GetPropertyType(dbContext, typeof(TDependent), orderPropertyName);
-        var selected = (TDependent?)await PolymorphicQueryExecutor.FirstOrDefaultByTwoPropertiesOrderedAsync(
-            dbContext,
-            typeof(TDependent),
-            reference.TypePropertyName,
-            typeof(string),
-            association.Alias,
-            reference.IdPropertyName,
-            reference.IdPropertyType,
-            ownerId,
-            orderPropertyName,
-            orderPropertyType,
-            aggregate == MorphOneOfManyAggregate.Max,
-            cancellationToken);
+        var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
+        query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
+        query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.IdPropertyName, reference.IdPropertyType, ownerId);
+        query = PolymorphicQueryableLoader.OrderByProperty(query, orderPropertyName, orderPropertyType, aggregate == MorphOneOfManyAggregate.Max);
+
+        var selected = await query.FirstOrDefaultAsync(cancellationToken);
 
         AssignProperty(principal!, assignToPropertyName ?? inverseRelationshipName, selected);
         return selected;
@@ -494,7 +665,7 @@ public static class DbContextMorphExtensions
         where TPrincipal : class
         where TDependent : class
     {
-        return dbContext.LoadMorphOneOfManyAsync(principals, inverseRelationshipName, orderBy, MorphOneOfManyAggregate.Max, assignToPropertyName, cancellationToken);
+        return dbContext.LoadMorphOneOfManyAsync(principals, inverseRelationshipName, orderBy, MorphOneOfManyAggregate.Max, assignToPropertyName, queryTransform: null, cancellationToken);
     }
 
     public static Task<IReadOnlyDictionary<TPrincipal, TDependent?>> LoadMorphOldestOfManyAsync<TPrincipal, TDependent, TOrder>(
@@ -507,7 +678,7 @@ public static class DbContextMorphExtensions
         where TPrincipal : class
         where TDependent : class
     {
-        return dbContext.LoadMorphOneOfManyAsync(principals, inverseRelationshipName, orderBy, MorphOneOfManyAggregate.Min, assignToPropertyName, cancellationToken);
+        return dbContext.LoadMorphOneOfManyAsync(principals, inverseRelationshipName, orderBy, MorphOneOfManyAggregate.Min, assignToPropertyName, queryTransform: null, cancellationToken);
     }
 
     public static async Task<IReadOnlyDictionary<TPrincipal, TDependent?>> LoadMorphOneOfManyAsync<TPrincipal, TDependent, TOrder>(
@@ -517,6 +688,7 @@ public static class DbContextMorphExtensions
         Expression<Func<TDependent, TOrder>> orderBy,
         MorphOneOfManyAggregate aggregate,
         string? assignToPropertyName = null,
+        Func<IQueryable<TDependent>, IQueryable<TDependent>>? queryTransform = null,
         CancellationToken cancellationToken = default)
         where TPrincipal : class
         where TDependent : class
@@ -541,6 +713,7 @@ public static class DbContextMorphExtensions
                 orderBy,
                 aggregate,
                 assignToPropertyName,
+                queryTransform,
                 cancellationToken);
 
             AssignProperty(principal!, assignToPropertyName ?? inverseRelationshipName, selected);
@@ -638,6 +811,17 @@ public static class DbContextMorphExtensions
         return await dbContext.LoadMorphToManyAsync<TPrincipal, TRelated>(principal, relationshipName, queryTransform: null, cancellationToken);
     }
 
+    public static Task<IReadOnlyList<TRelated>> LoadMorphToManyUntrackedAsync<TPrincipal, TRelated>(
+        this DbContext dbContext,
+        TPrincipal principal,
+        string relationshipName,
+        CancellationToken cancellationToken = default)
+        where TPrincipal : class
+        where TRelated : class
+    {
+        return dbContext.LoadMorphToManyAsync<TPrincipal, TRelated>(principal, relationshipName, query => query.AsNoTracking(), cancellationToken);
+    }
+
     public static async Task<IReadOnlyList<TRelated>> LoadMorphToManyAsync<TPrincipal, TRelated>(
         this DbContext dbContext,
         TPrincipal principal,
@@ -702,6 +886,17 @@ public static class DbContextMorphExtensions
         where TRelated : class
     {
         return await dbContext.LoadMorphToManyAsync<TPrincipal, TRelated>(principals, relationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static Task<IReadOnlyDictionary<TPrincipal, IReadOnlyList<TRelated>>> LoadMorphToManyUntrackedAsync<TPrincipal, TRelated>(
+        this DbContext dbContext,
+        IEnumerable<TPrincipal> principals,
+        string relationshipName,
+        CancellationToken cancellationToken = default)
+        where TPrincipal : class
+        where TRelated : class
+    {
+        return dbContext.LoadMorphToManyAsync<TPrincipal, TRelated>(principals, relationshipName, query => query.AsNoTracking(), cancellationToken);
     }
 
     public static async Task<IReadOnlyDictionary<TPrincipal, IReadOnlyList<TRelated>>> LoadMorphToManyAsync<TPrincipal, TRelated>(
@@ -830,6 +1025,17 @@ public static class DbContextMorphExtensions
         return await dbContext.LoadMorphedByManyAsync<TRelated, TPrincipal>(related, inverseRelationshipName, queryTransform: null, cancellationToken);
     }
 
+    public static Task<IReadOnlyList<TPrincipal>> LoadMorphedByManyUntrackedAsync<TRelated, TPrincipal>(
+        this DbContext dbContext,
+        TRelated related,
+        string inverseRelationshipName,
+        CancellationToken cancellationToken = default)
+        where TRelated : class
+        where TPrincipal : class
+    {
+        return dbContext.LoadMorphedByManyAsync<TRelated, TPrincipal>(related, inverseRelationshipName, query => query.AsNoTracking(), cancellationToken);
+    }
+
     public static async Task<IReadOnlyList<TPrincipal>> LoadMorphedByManyAsync<TRelated, TPrincipal>(
         this DbContext dbContext,
         TRelated related,
@@ -893,6 +1099,17 @@ public static class DbContextMorphExtensions
         where TPrincipal : class
     {
         return await dbContext.LoadMorphedByManyAsync<TRelated, TPrincipal>(relatedEntities, inverseRelationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static Task<IReadOnlyDictionary<TRelated, IReadOnlyList<TPrincipal>>> LoadMorphedByManyUntrackedAsync<TRelated, TPrincipal>(
+        this DbContext dbContext,
+        IEnumerable<TRelated> relatedEntities,
+        string inverseRelationshipName,
+        CancellationToken cancellationToken = default)
+        where TRelated : class
+        where TPrincipal : class
+    {
+        return dbContext.LoadMorphedByManyAsync<TRelated, TPrincipal>(relatedEntities, inverseRelationshipName, query => query.AsNoTracking(), cancellationToken);
     }
 
     public static async Task<IReadOnlyDictionary<TRelated, IReadOnlyList<TPrincipal>>> LoadMorphedByManyAsync<TRelated, TPrincipal>(
@@ -1039,6 +1256,7 @@ public static class DbContextMorphExtensions
         PolymorphicModelMetadata.MorphAssociation association,
         IEnumerable<object> ownerIds,
         MorphBatchLoadPlan<TDependent>? batchLoadPlan,
+        bool asNoTracking,
         CancellationToken cancellationToken)
         where TDependent : class
     {
@@ -1052,6 +1270,18 @@ public static class DbContextMorphExtensions
                 association.PrincipalKeyPropertyName,
                 keyPropertyType,
                 ownerIds,
+                cancellationToken);
+        }
+
+        if (asNoTracking)
+        {
+            return await PolymorphicQueryExecutor.ListByPropertyValuesAsync(
+                dbContext,
+                association.PrincipalType,
+                association.PrincipalKeyPropertyName,
+                keyPropertyType,
+                ownerIds,
+                asNoTracking: true,
                 cancellationToken);
         }
 
@@ -1069,6 +1299,22 @@ public static class DbContextMorphExtensions
     {
         var results = new List<TEntity>();
         var seen = new HashSet<TEntity>();
+
+        foreach (var entity in entities)
+        {
+            if (entity is not null && seen.Add(entity))
+            {
+                results.Add(entity);
+            }
+        }
+
+        return results;
+    }
+
+    private static List<object> CollectDistinctObjects(IEnumerable<object> entities)
+    {
+        var results = new List<object>();
+        var seen = new HashSet<object>();
 
         foreach (var entity in entities)
         {

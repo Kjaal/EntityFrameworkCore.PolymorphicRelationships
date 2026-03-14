@@ -283,6 +283,51 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task LoadMorphManyAcrossAsync_batches_inverse_relationships_for_mixed_principals()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 73, Title = "Post" };
+        var video = new Video { Id = 74, Title = "Video" };
+        var postComment = new Comment { Id = 903, Body = "Post comment" };
+        var videoComment = new Comment { Id = 904, Body = "Video comment" };
+
+        dbContext.AddRange(post, video, postComment, videoComment);
+        dbContext.SetMorphReference(postComment, nameof(Comment.Commentable), post);
+        dbContext.SetMorphReference(videoComment, nameof(Comment.Commentable), video);
+        await dbContext.SaveChangesAsync();
+
+        var commentsByPrincipal = await dbContext.LoadMorphManyAcrossAsync<Comment>(new object[] { post, video }, nameof(Post.Comments));
+
+        Assert.Single(commentsByPrincipal[post]);
+        Assert.Single(commentsByPrincipal[video]);
+        Assert.Equal(postComment.Id, commentsByPrincipal[post][0].Id);
+        Assert.Equal(videoComment.Id, commentsByPrincipal[video][0].Id);
+    }
+
+    [Fact]
+    public async Task Untracked_helpers_load_expected_relationships()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 75, Title = "Post" };
+        var comment = new Comment { Id = 905, Body = "Comment" };
+        var tag = new Tag { Id = 1003, Name = "Tag" };
+
+        dbContext.AddRange(post, comment, tag);
+        dbContext.SetMorphReference(comment, nameof(Comment.Commentable), post);
+        dbContext.AttachMorphToMany<Post, Tag, TagAssignment>(post, nameof(Post.Tags), tag);
+        await dbContext.SaveChangesAsync();
+
+        var owner = await dbContext.LoadMorphUntrackedAsync<Comment, Post>(comment, nameof(Comment.Commentable));
+        var comments = await dbContext.LoadMorphManyUntrackedAsync<Post, Comment>(new[] { post }, nameof(Post.Comments));
+        var tags = await dbContext.LoadMorphToManyUntrackedAsync<Post, Tag>(new[] { post }, nameof(Post.Tags));
+
+        Assert.NotNull(owner);
+        Assert.Single(comments[post]);
+        Assert.Single(tags[post]);
+        Assert.Equal(tag.Id, tags[post][0].Id);
+    }
+
+    [Fact]
     public async Task Convention_helpers_use_laravel_style_shadow_column_names()
     {
         await using var dbContext = CreateContext();

@@ -39,7 +39,20 @@ internal static class PolymorphicQueryExecutor
         .GetMethod(nameof(ListByPropertyValuesCore), BindingFlags.NonPublic | BindingFlags.Static)!;
 
     private static readonly MethodInfo ListByPropertyValuesAsyncMethod = typeof(PolymorphicQueryExecutor)
-        .GetMethod(nameof(ListByPropertyValuesCoreAsync), BindingFlags.NonPublic | BindingFlags.Static)!;
+        .GetMethod(
+            nameof(ListByPropertyValuesCoreAsync),
+            BindingFlags.NonPublic | BindingFlags.Static,
+            binder: null,
+            types: new[] { typeof(DbContext), typeof(string), typeof(object[]), typeof(CancellationToken) },
+            modifiers: null)!;
+
+    private static readonly MethodInfo ListByPropertyValuesAsyncNoTrackingMethod = typeof(PolymorphicQueryExecutor)
+        .GetMethod(
+            nameof(ListByPropertyValuesCoreAsync),
+            BindingFlags.NonPublic | BindingFlags.Static,
+            binder: null,
+            types: new[] { typeof(DbContext), typeof(string), typeof(object[]), typeof(CancellationToken), typeof(bool) },
+            modifiers: null)!;
 
     public static object? SingleOrDefaultByProperty(DbContext dbContext, Type entityType, string propertyName, Type propertyType, object propertyValue)
     {
@@ -223,6 +236,38 @@ internal static class PolymorphicQueryExecutor
             .Invoke(null, new object?[] { dbContext, propertyName, propertyValues.ToArray(), cancellationToken })!;
     }
 
+    public static Task<IReadOnlyList<object>> ListByPropertyValuesAsync(
+        DbContext dbContext,
+        Type entityType,
+        string propertyName,
+        Type propertyType,
+        IEnumerable<object> propertyValues,
+        bool asNoTracking,
+        CancellationToken cancellationToken)
+    {
+        if (!asNoTracking)
+        {
+            return ListByPropertyValuesAsync(dbContext, entityType, propertyName, propertyType, propertyValues, cancellationToken);
+        }
+
+        return (Task<IReadOnlyList<object>>)ListByPropertyValuesAsyncNoTrackingMethod
+            .MakeGenericMethod(entityType, propertyType)
+            .Invoke(null, new object?[] { dbContext, propertyName, propertyValues.ToArray(), cancellationToken, true })!;
+    }
+
+    public static Task<IReadOnlyList<object>> ListByPropertyValuesUntrackedAsync(
+        DbContext dbContext,
+        Type entityType,
+        string propertyName,
+        Type propertyType,
+        IEnumerable<object> propertyValues,
+        CancellationToken cancellationToken)
+    {
+        return (Task<IReadOnlyList<object>>)ListByPropertyValuesAsyncNoTrackingMethod
+            .MakeGenericMethod(entityType, propertyType)
+            .Invoke(null, new object?[] { dbContext, propertyName, propertyValues.ToArray(), cancellationToken, true })!;
+    }
+
     private static object? SingleOrDefaultByPropertyCore<TEntity, TProperty>(DbContext dbContext, string propertyName, object propertyValue)
         where TEntity : class
     {
@@ -352,12 +397,19 @@ internal static class PolymorphicQueryExecutor
     private static async Task<IReadOnlyList<object>> ListByPropertyValuesCoreAsync<TEntity, TProperty>(DbContext dbContext, string propertyName, object[] propertyValues, CancellationToken cancellationToken)
         where TEntity : class
     {
+        return await ListByPropertyValuesCoreAsync<TEntity, TProperty>(dbContext, propertyName, propertyValues, cancellationToken, asNoTracking: false);
+    }
+
+    private static async Task<IReadOnlyList<object>> ListByPropertyValuesCoreAsync<TEntity, TProperty>(DbContext dbContext, string propertyName, object[] propertyValues, CancellationToken cancellationToken, bool asNoTracking)
+        where TEntity : class
+    {
         if (propertyValues.Length == 0)
         {
             return Array.Empty<object>();
         }
 
-        var entities = await PolymorphicQueryableLoader.WherePropertyIn(dbContext.Set<TEntity>(), propertyName, typeof(TProperty), propertyValues)
+        var query = asNoTracking ? dbContext.Set<TEntity>().AsNoTracking() : dbContext.Set<TEntity>().AsQueryable();
+        var entities = await PolymorphicQueryableLoader.WherePropertyIn(query, propertyName, typeof(TProperty), propertyValues)
             .ToListAsync(cancellationToken);
 
         return entities.Cast<object>().ToList();
