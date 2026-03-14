@@ -2,7 +2,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 
-namespace EFCorePolymorphicExtension.Infrastructure;
+namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 public sealed class PolymorphicCascadeDeleteInterceptor : SaveChangesInterceptor
 {
@@ -251,4 +251,5 @@ public sealed class PolymorphicCascadeDeleteInterceptor : SaveChangesInterceptor
         return $"{RuntimeHelpers.GetHashCode(entity)}:{kind}:{relationshipName}:{inverseRelationshipName}";
     }
 }
+
 

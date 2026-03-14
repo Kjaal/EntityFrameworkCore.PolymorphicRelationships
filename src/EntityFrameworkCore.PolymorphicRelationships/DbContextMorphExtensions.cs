@@ -1,9 +1,9 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Linq.Expressions;
-using EFCorePolymorphicExtension.Infrastructure;
+using EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 
-namespace EFCorePolymorphicExtension;
+namespace EntityFrameworkCore.PolymorphicRelationships;
 
 public static class DbContextMorphExtensions
 {
@@ -91,7 +91,48 @@ public static class DbContextMorphExtensions
         where TDependent : class
         where TPrincipal : class
     {
-        return (TPrincipal?)await dbContext.LoadMorphAsync(dependent, relationshipName, cancellationToken);
+        return await dbContext.LoadMorphAsync<TDependent, TPrincipal>(dependent, relationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static async Task<TPrincipal?> LoadMorphAsync<TDependent, TPrincipal>(
+        this DbContext dbContext,
+        TDependent dependent,
+        string relationshipName,
+        Func<IQueryable<TPrincipal>, IQueryable<TPrincipal>>? queryTransform,
+        CancellationToken cancellationToken = default)
+        where TDependent : class
+        where TPrincipal : class
+    {
+        ArgumentNullException.ThrowIfNull(dbContext);
+        ArgumentNullException.ThrowIfNull(dependent);
+
+        var reference = PolymorphicModelMetadata.GetRequiredReference(dbContext.Model, typeof(TDependent), relationshipName);
+        var dependentEntry = dbContext.Entry(dependent);
+        var typeAlias = dependentEntry.Property<string?>(reference.TypePropertyName).CurrentValue;
+        var ownerId = dependentEntry.Property(reference.IdPropertyName).CurrentValue;
+
+        if (string.IsNullOrWhiteSpace(typeAlias) || ownerId is null)
+        {
+            AssignProperty(dependent, relationshipName, null);
+            return null;
+        }
+
+        var association = reference.Associations.FirstOrDefault(candidate => candidate.PrincipalType.IsAssignableFrom(typeof(TPrincipal))
+            && string.Equals(candidate.Alias, typeAlias, StringComparison.Ordinal));
+
+        if (association is null)
+        {
+            AssignProperty(dependent, relationshipName, null);
+            return null;
+        }
+
+        var keyPropertyType = GetPropertyType(dbContext, association.PrincipalType, association.PrincipalKeyPropertyName);
+        var query = ApplyQueryTransform(dbContext.Set<TPrincipal>().AsQueryable(), queryTransform);
+        query = WherePropertyEquals(query, association.PrincipalKeyPropertyName, keyPropertyType, ownerId);
+
+        var entity = await query.SingleOrDefaultAsync(cancellationToken);
+        AssignProperty(dependent, relationshipName, entity);
+        return entity;
     }
 
     public static async Task<IReadOnlyDictionary<TDependent, object?>> LoadMorphsAsync<TDependent>(
@@ -101,8 +142,26 @@ public static class DbContextMorphExtensions
         CancellationToken cancellationToken = default)
         where TDependent : class
     {
+        return await dbContext.LoadMorphsAsync(dependents, relationshipName, configure: null, cancellationToken);
+    }
+
+    public static async Task<IReadOnlyDictionary<TDependent, object?>> LoadMorphsAsync<TDependent>(
+        this DbContext dbContext,
+        IEnumerable<TDependent> dependents,
+        string relationshipName,
+        Action<MorphBatchLoadPlan<TDependent>>? configure,
+        CancellationToken cancellationToken = default)
+        where TDependent : class
+    {
         ArgumentNullException.ThrowIfNull(dbContext);
         ArgumentNullException.ThrowIfNull(dependents);
+
+        MorphBatchLoadPlan<TDependent>? batchLoadPlan = null;
+        if (configure is not null)
+        {
+            batchLoadPlan = new MorphBatchLoadPlan<TDependent>();
+            configure(batchLoadPlan);
+        }
 
         var dependentList = dependents.Where(dependent => dependent is not null).Distinct().ToList();
         var results = new Dictionary<TDependent, object?>();
@@ -146,12 +205,11 @@ public static class DbContextMorphExtensions
                 .Distinct()
                 .ToArray();
 
-            var owners = await PolymorphicQueryExecutor.ListByPropertyValuesAsync(
+            var owners = await LoadMorphOwnersAsync(
                 dbContext,
-                association.PrincipalType,
-                association.PrincipalKeyPropertyName,
-                keyPropertyType,
+                association,
                 ownerIds,
+                batchLoadPlan,
                 cancellationToken);
 
             var ownersById = owners.ToDictionary(
@@ -220,6 +278,18 @@ public static class DbContextMorphExtensions
         where TPrincipal : class
         where TDependent : class
     {
+        return await dbContext.LoadMorphManyAsync<TPrincipal, TDependent>(principal, inverseRelationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static async Task<IReadOnlyList<TDependent>> LoadMorphManyAsync<TPrincipal, TDependent>(
+        this DbContext dbContext,
+        TPrincipal principal,
+        string inverseRelationshipName,
+        Func<IQueryable<TDependent>, IQueryable<TDependent>>? queryTransform,
+        CancellationToken cancellationToken = default)
+        where TPrincipal : class
+        where TDependent : class
+    {
         ArgumentNullException.ThrowIfNull(dbContext);
         ArgumentNullException.ThrowIfNull(principal);
 
@@ -239,18 +309,11 @@ public static class DbContextMorphExtensions
             return Array.Empty<TDependent>();
         }
 
-        var dependents = await PolymorphicQueryExecutor.ListByTwoPropertiesAsync(
-            dbContext,
-            typeof(TDependent),
-            reference.TypePropertyName,
-            typeof(string),
-            association.Alias,
-            reference.IdPropertyName,
-            reference.IdPropertyType,
-            ownerId,
-            cancellationToken);
+        var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
+        query = WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
+        query = WherePropertyEquals(query, reference.IdPropertyName, reference.IdPropertyType, ownerId);
 
-        var typedDependents = dependents.Cast<TDependent>().ToList();
+        var typedDependents = await query.ToListAsync(cancellationToken);
         AssignProperty(principal, inverseRelationshipName, typedDependents);
         return typedDependents;
     }
@@ -259,6 +322,18 @@ public static class DbContextMorphExtensions
         this DbContext dbContext,
         IEnumerable<TPrincipal> principals,
         string inverseRelationshipName,
+        CancellationToken cancellationToken = default)
+        where TPrincipal : class
+        where TDependent : class
+    {
+        return await dbContext.LoadMorphManyAsync<TPrincipal, TDependent>(principals, inverseRelationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static async Task<IReadOnlyDictionary<TPrincipal, IReadOnlyList<TDependent>>> LoadMorphManyAsync<TPrincipal, TDependent>(
+        this DbContext dbContext,
+        IEnumerable<TPrincipal> principals,
+        string inverseRelationshipName,
+        Func<IQueryable<TDependent>, IQueryable<TDependent>>? queryTransform,
         CancellationToken cancellationToken = default)
         where TPrincipal : class
         where TDependent : class
@@ -295,20 +370,17 @@ public static class DbContextMorphExtensions
             .Distinct()
             .ToArray();
 
-        var dependents = await PolymorphicQueryExecutor.ListByPropertyValuesAsync(
-            dbContext,
-            typeof(TDependent),
-            reference.IdPropertyName,
-            reference.IdPropertyType,
-            ownerIds,
-            cancellationToken);
+        var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
+        query = WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
+        query = WherePropertyIn(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds);
+
+        var dependents = await query.ToListAsync(cancellationToken);
 
         var groupedDependents = dependents
-            .Where(dependent => string.Equals(GetPropertyValueViaEntry(dbContext, dependent, reference.TypePropertyName) as string, association.Alias, StringComparison.Ordinal))
             .GroupBy(dependent => CreateLookupKey(GetPropertyValueViaEntry(dbContext, dependent, reference.IdPropertyName)), StringComparer.Ordinal)
             .ToDictionary(
                 group => group.Key,
-                group => (IReadOnlyList<TDependent>)group.Cast<TDependent>().ToList(),
+                group => (IReadOnlyList<TDependent>)group.ToList(),
                 StringComparer.Ordinal);
 
         foreach (var item in principalIds)
@@ -550,6 +622,18 @@ public static class DbContextMorphExtensions
         where TPrincipal : class
         where TRelated : class
     {
+        return await dbContext.LoadMorphToManyAsync<TPrincipal, TRelated>(principal, relationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static async Task<IReadOnlyList<TRelated>> LoadMorphToManyAsync<TPrincipal, TRelated>(
+        this DbContext dbContext,
+        TPrincipal principal,
+        string relationshipName,
+        Func<IQueryable<TRelated>, IQueryable<TRelated>>? queryTransform,
+        CancellationToken cancellationToken = default)
+        where TPrincipal : class
+        where TRelated : class
+    {
         ArgumentNullException.ThrowIfNull(dbContext);
         ArgumentNullException.ThrowIfNull(principal);
 
@@ -588,15 +672,10 @@ public static class DbContextMorphExtensions
             return empty;
         }
 
-        var relatedEntities = await PolymorphicQueryExecutor.ListByPropertyValuesAsync(
-            dbContext,
-            relation.RelatedType,
-            relation.RelatedKeyPropertyName,
-            relation.RelatedKeyType,
-            relatedIds,
-            cancellationToken);
+        var query = ApplyQueryTransform(dbContext.Set<TRelated>().AsQueryable(), queryTransform);
+        query = WherePropertyIn(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds);
 
-        var typedRelatedEntities = relatedEntities.Cast<TRelated>().ToList();
+        var typedRelatedEntities = await query.ToListAsync(cancellationToken);
         AssignProperty(principal, relationshipName, typedRelatedEntities);
         return typedRelatedEntities;
     }
@@ -605,6 +684,18 @@ public static class DbContextMorphExtensions
         this DbContext dbContext,
         IEnumerable<TPrincipal> principals,
         string relationshipName,
+        CancellationToken cancellationToken = default)
+        where TPrincipal : class
+        where TRelated : class
+    {
+        return await dbContext.LoadMorphToManyAsync<TPrincipal, TRelated>(principals, relationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static async Task<IReadOnlyDictionary<TPrincipal, IReadOnlyList<TRelated>>> LoadMorphToManyAsync<TPrincipal, TRelated>(
+        this DbContext dbContext,
+        IEnumerable<TPrincipal> principals,
+        string relationshipName,
+        Func<IQueryable<TRelated>, IQueryable<TRelated>>? queryTransform,
         CancellationToken cancellationToken = default)
         where TPrincipal : class
         where TRelated : class
@@ -655,17 +746,13 @@ public static class DbContextMorphExtensions
             .Distinct()
             .ToArray();
 
-        var relatedEntities = await PolymorphicQueryExecutor.ListByPropertyValuesAsync(
-            dbContext,
-            relation.RelatedType,
-            relation.RelatedKeyPropertyName,
-            relation.RelatedKeyType,
-            relatedIds,
-            cancellationToken);
+        var query = ApplyQueryTransform(dbContext.Set<TRelated>().AsQueryable(), queryTransform);
+        query = WherePropertyIn(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds);
+        var relatedEntities = await query.ToListAsync(cancellationToken);
 
         var relatedLookup = relatedEntities.ToDictionary(
-            related => CreateLookupKey(GetPropertyValueViaEntry(dbContext, related, relation.RelatedKeyPropertyName)),
-            related => (TRelated)related,
+            related => CreateLookupKey(GetPropertyValueViaEntry(dbContext, related!, relation.RelatedKeyPropertyName)),
+            related => related,
             StringComparer.Ordinal);
 
         var groupedPivots = filteredPivots
@@ -698,6 +785,18 @@ public static class DbContextMorphExtensions
         this DbContext dbContext,
         TRelated related,
         string inverseRelationshipName,
+        CancellationToken cancellationToken = default)
+        where TRelated : class
+        where TPrincipal : class
+    {
+        return await dbContext.LoadMorphedByManyAsync<TRelated, TPrincipal>(related, inverseRelationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static async Task<IReadOnlyList<TPrincipal>> LoadMorphedByManyAsync<TRelated, TPrincipal>(
+        this DbContext dbContext,
+        TRelated related,
+        string inverseRelationshipName,
+        Func<IQueryable<TPrincipal>, IQueryable<TPrincipal>>? queryTransform,
         CancellationToken cancellationToken = default)
         where TRelated : class
         where TPrincipal : class
@@ -740,15 +839,9 @@ public static class DbContextMorphExtensions
             return empty;
         }
 
-        var principals = await PolymorphicQueryExecutor.ListByPropertyValuesAsync(
-            dbContext,
-            relation.PrincipalType,
-            relation.PrincipalKeyPropertyName,
-            relation.PrincipalKeyType,
-            principalIds,
-            cancellationToken);
-
-        var typedPrincipals = principals.Cast<TPrincipal>().ToList();
+        var query = ApplyQueryTransform(dbContext.Set<TPrincipal>().AsQueryable(), queryTransform);
+        query = WherePropertyIn(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds);
+        var typedPrincipals = await query.ToListAsync(cancellationToken);
         AssignProperty(related, inverseRelationshipName, typedPrincipals);
         return typedPrincipals;
     }
@@ -757,6 +850,18 @@ public static class DbContextMorphExtensions
         this DbContext dbContext,
         IEnumerable<TRelated> relatedEntities,
         string inverseRelationshipName,
+        CancellationToken cancellationToken = default)
+        where TRelated : class
+        where TPrincipal : class
+    {
+        return await dbContext.LoadMorphedByManyAsync<TRelated, TPrincipal>(relatedEntities, inverseRelationshipName, queryTransform: null, cancellationToken);
+    }
+
+    public static async Task<IReadOnlyDictionary<TRelated, IReadOnlyList<TPrincipal>>> LoadMorphedByManyAsync<TRelated, TPrincipal>(
+        this DbContext dbContext,
+        IEnumerable<TRelated> relatedEntities,
+        string inverseRelationshipName,
+        Func<IQueryable<TPrincipal>, IQueryable<TPrincipal>>? queryTransform,
         CancellationToken cancellationToken = default)
         where TRelated : class
         where TPrincipal : class
@@ -807,17 +912,13 @@ public static class DbContextMorphExtensions
             .Distinct()
             .ToArray();
 
-        var principals = await PolymorphicQueryExecutor.ListByPropertyValuesAsync(
-            dbContext,
-            relation.PrincipalType,
-            relation.PrincipalKeyPropertyName,
-            relation.PrincipalKeyType,
-            principalIds,
-            cancellationToken);
+        var query = ApplyQueryTransform(dbContext.Set<TPrincipal>().AsQueryable(), queryTransform);
+        query = WherePropertyIn(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds);
+        var principals = await query.ToListAsync(cancellationToken);
 
         var principalLookup = principals.ToDictionary(
-            principal => CreateLookupKey(GetPropertyValueViaEntry(dbContext, principal, relation.PrincipalKeyPropertyName)),
-            principal => (TPrincipal)principal,
+            principal => CreateLookupKey(GetPropertyValueViaEntry(dbContext, principal!, relation.PrincipalKeyPropertyName)),
+            principal => principal,
             StringComparer.Ordinal);
 
         var groupedPivots = filteredPivots
@@ -858,6 +959,107 @@ public static class DbContextMorphExtensions
     {
         return GetEntityKeyValueOrNull(dbContext, entity, propertyName)
             ?? throw new InvalidOperationException($"The key property '{propertyName}' on '{entity.GetType().Name}' is null.");
+    }
+
+    private static async Task<IReadOnlyList<object>> LoadMorphOwnersAsync<TDependent>(
+        DbContext dbContext,
+        PolymorphicModelMetadata.MorphAssociation association,
+        IEnumerable<object> ownerIds,
+        MorphBatchLoadPlan<TDependent>? batchLoadPlan,
+        CancellationToken cancellationToken)
+        where TDependent : class
+    {
+        var keyPropertyType = GetPropertyType(dbContext, association.PrincipalType, association.PrincipalKeyPropertyName);
+        var registration = batchLoadPlan?.FindRegistration(association.PrincipalType);
+
+        if (registration is not null)
+        {
+            return await registration.LoadAsync(
+                dbContext,
+                association.PrincipalKeyPropertyName,
+                keyPropertyType,
+                ownerIds,
+                cancellationToken);
+        }
+
+        return await PolymorphicQueryExecutor.ListByPropertyValuesAsync(
+            dbContext,
+            association.PrincipalType,
+            association.PrincipalKeyPropertyName,
+            keyPropertyType,
+            ownerIds,
+            cancellationToken);
+    }
+
+    private static IQueryable<TEntity> ApplyQueryTransform<TEntity>(
+        IQueryable<TEntity> query,
+        Func<IQueryable<TEntity>, IQueryable<TEntity>>? queryTransform)
+        where TEntity : class
+    {
+        return queryTransform is null ? query : queryTransform(query);
+    }
+
+    private static IQueryable<TEntity> WherePropertyEquals<TEntity>(
+        IQueryable<TEntity> query,
+        string propertyName,
+        Type propertyType,
+        object? value)
+        where TEntity : class
+    {
+        var parameter = Expression.Parameter(typeof(TEntity), "entity");
+        var property = Expression.Call(
+            typeof(EF),
+            nameof(EF.Property),
+            new[] { propertyType },
+            parameter,
+            Expression.Constant(propertyName));
+
+        var equals = Expression.Equal(property, PolymorphicValueConverter.BuildTypedConstantExpression(value, propertyType));
+        var predicate = Expression.Lambda<Func<TEntity, bool>>(equals, parameter);
+        return query.Where(predicate);
+    }
+
+    private static IQueryable<TEntity> WherePropertyIn<TEntity>(
+        IQueryable<TEntity> query,
+        string propertyName,
+        Type propertyType,
+        IEnumerable<object> values)
+        where TEntity : class
+    {
+        var convertedValues = values
+            .Select(value => PolymorphicValueConverter.ConvertForAssignment(value, propertyType))
+            .Where(value => value is not null)
+            .Distinct()
+            .ToArray();
+
+        if (convertedValues.Length == 0)
+        {
+            return query.Where(_ => false);
+        }
+
+        var typedArray = Array.CreateInstance(propertyType, convertedValues.Length);
+        for (var index = 0; index < convertedValues.Length; index++)
+        {
+            typedArray.SetValue(convertedValues[index], index);
+        }
+
+        var parameter = Expression.Parameter(typeof(TEntity), "entity");
+        var property = Expression.Call(
+            typeof(EF),
+            nameof(EF.Property),
+            new[] { propertyType },
+            parameter,
+            Expression.Constant(propertyName));
+
+        var contains = Expression.Call(
+            typeof(Enumerable),
+            nameof(Enumerable.Contains),
+            new[] { propertyType },
+            Expression.Constant(typedArray, propertyType.MakeArrayType()),
+            property);
+
+        var predicate = Expression.Lambda<Func<TEntity, bool>>(contains, parameter);
+        return query.Where(predicate);
     }
 
     private static object? GetEntityKeyValueOrNull(DbContext dbContext, object entity, string propertyName)
@@ -935,4 +1137,5 @@ public static class DbContextMorphExtensions
     }
 
 }
+
 

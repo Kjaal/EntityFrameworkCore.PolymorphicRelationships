@@ -1,9 +1,9 @@
 ﻿using System.Linq.Expressions;
-using EFCorePolymorphicExtension.Infrastructure;
+using EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
-namespace EFCorePolymorphicExtension;
+namespace EntityFrameworkCore.PolymorphicRelationships;
 
 public sealed class PolymorphicModelBuilder
 {
@@ -17,22 +17,29 @@ public sealed class PolymorphicModelBuilder
     public PolymorphicModelBuilder MorphMap<TEntity>(string alias)
         where TEntity : class
     {
+        return MorphMap(typeof(TEntity), alias);
+    }
+
+    internal PolymorphicModelBuilder MorphMap(Type entityType, string alias)
+    {
         if (string.IsNullOrWhiteSpace(alias))
         {
             throw new ArgumentException("Morph alias cannot be empty.", nameof(alias));
         }
 
         var mappings = PolymorphicModelMetadata.GetOrCreateTypeMappings(_modelBuilder.Model);
-        var existing = mappings.FirstOrDefault(mapping => mapping.ClrType == typeof(TEntity));
+        var existing = mappings.FirstOrDefault(mapping => mapping.ClrType == entityType);
 
         if (existing is null)
         {
-            mappings.Add(new PolymorphicModelMetadata.MorphTypeMapping(typeof(TEntity), alias));
+            mappings.Add(new PolymorphicModelMetadata.MorphTypeMapping(entityType, alias));
         }
         else
         {
             existing.Alias = alias;
         }
+
+        PolymorphicModelMetadata.SyncTypeMappings(_modelBuilder.Model, mappings);
 
         return this;
     }
@@ -41,6 +48,124 @@ public sealed class PolymorphicModelBuilder
         where TEntity : class
     {
         return new MorphEntityBuilder<TEntity>(_modelBuilder, _modelBuilder.Entity<TEntity>());
+    }
+
+    internal void RegisterMorphTo(Type dependentType, string relationshipName, string typePropertyName, string idPropertyName, Type idPropertyType)
+    {
+        if (string.IsNullOrWhiteSpace(relationshipName))
+        {
+            throw new ArgumentException("Relationship name cannot be empty.", nameof(relationshipName));
+        }
+
+        var entityBuilder = _modelBuilder.Entity(dependentType);
+        entityBuilder.Property(typeof(string), typePropertyName);
+        entityBuilder.Property(idPropertyType, idPropertyName);
+        entityBuilder.HasIndex(typePropertyName, idPropertyName);
+
+        var references = PolymorphicModelMetadata.GetOrCreateReferences(_modelBuilder.Model);
+        var reference = references.FirstOrDefault(candidate => candidate.DependentType == dependentType
+            && string.Equals(candidate.RelationshipName, relationshipName, StringComparison.Ordinal));
+
+        if (reference is null)
+        {
+            references.Add(new PolymorphicModelMetadata.MorphReference(dependentType, relationshipName, typePropertyName, idPropertyName, idPropertyType));
+        }
+
+        PolymorphicModelMetadata.SyncReferences(_modelBuilder.Model, references);
+    }
+
+    internal void RegisterAssociation(
+        Type dependentType,
+        string relationshipName,
+        Type principalType,
+        string inverseRelationshipName,
+        MorphMultiplicity multiplicity,
+        string? ownerKeyPropertyName,
+        PolymorphicDeleteBehavior deleteBehavior)
+    {
+        var principalEntityType = _modelBuilder.Model.FindEntityType(principalType)
+            ?? throw new InvalidOperationException($"Entity '{principalType.Name}' must be part of the EF model before it can participate in a polymorphic relationship.");
+
+        var references = PolymorphicModelMetadata.GetOrCreateReferences(_modelBuilder.Model);
+        var reference = references.FirstOrDefault(candidate => candidate.DependentType == dependentType
+            && string.Equals(candidate.RelationshipName, relationshipName, StringComparison.Ordinal))
+            ?? throw new InvalidOperationException($"The morphTo relationship '{dependentType.Name}.{relationshipName}' must be registered before inverse attribute conventions can be applied.");
+
+        var resolvedOwnerKey = string.IsNullOrWhiteSpace(ownerKeyPropertyName)
+            ? ExpressionHelpers.GetSingleKeyPropertyName(principalEntityType)
+            : ownerKeyPropertyName;
+
+        var alias = PolymorphicModelMetadata.GetAlias(_modelBuilder.Model, principalType);
+        var existing = reference.Associations.FirstOrDefault(candidate => candidate.PrincipalType == principalType
+            && string.Equals(candidate.InverseRelationshipName, inverseRelationshipName, StringComparison.Ordinal)
+            && candidate.Multiplicity == multiplicity);
+
+        if (existing is not null)
+        {
+            reference.Associations.Remove(existing);
+        }
+
+        reference.Associations.Add(new PolymorphicModelMetadata.MorphAssociation(
+            principalType,
+            inverseRelationshipName,
+            resolvedOwnerKey,
+            alias,
+            multiplicity,
+            deleteBehavior));
+
+        PolymorphicModelMetadata.SyncReferences(_modelBuilder.Model, references);
+    }
+
+    internal void RegisterMorphToManyConvention(
+        Type principalType,
+        Type relatedType,
+        Type pivotType,
+        string relationshipName,
+        string inverseRelationshipName,
+        string morphName,
+        string? principalKeyPropertyName,
+        string? relatedKeyPropertyName,
+        PolymorphicDeleteBehavior deleteBehavior)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(morphName);
+
+        var principalEntityType = _modelBuilder.Model.FindEntityType(principalType)
+            ?? throw new InvalidOperationException($"Entity '{principalType.Name}' must be part of the EF model before it can participate in a polymorphic many-to-many relationship.");
+
+        var relatedEntityType = _modelBuilder.Model.FindEntityType(relatedType)
+            ?? throw new InvalidOperationException($"Entity '{relatedType.Name}' must be part of the EF model before it can participate in a polymorphic many-to-many relationship.");
+
+        var principalKey = string.IsNullOrWhiteSpace(principalKeyPropertyName)
+            ? ExpressionHelpers.GetSingleKeyPropertyName(principalEntityType)
+            : principalKeyPropertyName;
+
+        var relatedKey = string.IsNullOrWhiteSpace(relatedKeyPropertyName)
+            ? ExpressionHelpers.GetSingleKeyPropertyName(relatedEntityType)
+            : relatedKeyPropertyName;
+
+        var principalKeyType = principalEntityType.FindProperty(principalKey)?.ClrType
+            ?? throw new InvalidOperationException($"Property '{principalKey}' was not found on '{principalType.Name}'.");
+
+        var relatedKeyType = relatedEntityType.FindProperty(relatedKey)?.ClrType
+            ?? throw new InvalidOperationException($"Property '{relatedKey}' was not found on '{relatedType.Name}'.");
+
+        var pivotBuilder = _modelBuilder.Entity(pivotType);
+        var pivotColumns = EntityTypeBuilderExtensions.HasMorphToManyColumns(pivotBuilder, morphName, relatedType, principalKeyType, relatedKeyType);
+
+        RegisterMorphToMany(
+            principalType,
+            relatedType,
+            pivotType,
+            relationshipName,
+            inverseRelationshipName,
+            pivotColumns.TypeColumnName,
+            pivotColumns.IdColumnName,
+            principalKeyType,
+            pivotColumns.RelatedIdColumnName,
+            relatedKeyType,
+            principalKey,
+            relatedKey,
+            deleteBehavior);
     }
 
     public PolymorphicModelBuilder MorphToMany<TPrincipal, TRelated, TPivot, TPrincipalKey, TRelatedKey>(
@@ -80,16 +205,19 @@ public sealed class PolymorphicModelBuilder
         pivotBuilder.Property(typePropertyName);
         pivotBuilder.Property(idPropertyName);
         pivotBuilder.Property(relatedIdPropertyName);
-        RegisterMorphToMany<TPrincipal, TRelated, TPivot, TPrincipalKey, TRelatedKey>(
+        RegisterMorphToMany(
+            typeof(TPrincipal),
+            typeof(TRelated),
+            typeof(TPivot),
             relationshipName,
             inverseRelationshipName,
-            principalEntityType,
-            relatedEntityType,
             typePropertyName,
             idPropertyName,
+            typeof(TPrincipalKey),
             relatedIdPropertyName,
-            principalKey,
-            relatedKey,
+            typeof(TRelatedKey),
+            principalKey is null ? ExpressionHelpers.GetSingleKeyPropertyName(principalEntityType) : ExpressionHelpers.GetPropertyName(principalKey),
+            relatedKey is null ? ExpressionHelpers.GetSingleKeyPropertyName(relatedEntityType) : ExpressionHelpers.GetPropertyName(relatedKey),
             deleteBehavior);
 
         return this;
@@ -132,31 +260,15 @@ public sealed class PolymorphicModelBuilder
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(morphName);
 
-        var pivotBuilder = _modelBuilder.Entity<TPivot>();
-        var typePropertyName = LaravelMorphNaming.GetMorphTypeColumnName(morphName);
-        var idPropertyName = LaravelMorphNaming.GetMorphIdColumnName(morphName);
-        var relatedIdPropertyName = LaravelMorphNaming.GetForeignKeyColumnName(typeof(TRelated));
-
-        pivotBuilder.Property<string?>(typePropertyName);
-        pivotBuilder.Property<TPrincipalKey>(idPropertyName);
-        pivotBuilder.Property<TRelatedKey>(relatedIdPropertyName);
-
-        var principalEntityType = _modelBuilder.Model.FindEntityType(typeof(TPrincipal))
-            ?? throw new InvalidOperationException($"Entity '{typeof(TPrincipal).Name}' must be part of the EF model before it can participate in a polymorphic many-to-many relationship.");
-
-        var relatedEntityType = _modelBuilder.Model.FindEntityType(typeof(TRelated))
-            ?? throw new InvalidOperationException($"Entity '{typeof(TRelated).Name}' must be part of the EF model before it can participate in a polymorphic many-to-many relationship.");
-
-        RegisterMorphToMany<TPrincipal, TRelated, TPivot, TPrincipalKey, TRelatedKey>(
+        RegisterMorphToManyConvention(
+            typeof(TPrincipal),
+            typeof(TRelated),
+            typeof(TPivot),
             relationshipName,
             inverseRelationshipName,
-            principalEntityType,
-            relatedEntityType,
-            typePropertyName,
-            idPropertyName,
-            relatedIdPropertyName,
-            principalKey,
-            relatedKey,
+            morphName,
+            principalKey is null ? null : ExpressionHelpers.GetPropertyName(principalKey),
+            relatedKey is null ? null : ExpressionHelpers.GetPropertyName(relatedKey),
             deleteBehavior);
 
         return this;
@@ -182,43 +294,44 @@ public sealed class PolymorphicModelBuilder
             deleteBehavior);
     }
 
-    private void RegisterMorphToMany<TPrincipal, TRelated, TPivot, TPrincipalKey, TRelatedKey>(
+    internal void RegisterMorphToMany(
+        Type principalType,
+        Type relatedType,
+        Type pivotType,
         string relationshipName,
         string inverseRelationshipName,
-        Microsoft.EntityFrameworkCore.Metadata.IReadOnlyEntityType principalEntityType,
-        Microsoft.EntityFrameworkCore.Metadata.IReadOnlyEntityType relatedEntityType,
         string typePropertyName,
         string idPropertyName,
+        Type pivotIdPropertyType,
         string relatedIdPropertyName,
-        Expression<Func<TPrincipal, TPrincipalKey>>? principalKey,
-        Expression<Func<TRelated, TRelatedKey>>? relatedKey,
+        Type pivotRelatedIdPropertyType,
+        string principalKeyPropertyName,
+        string relatedKeyPropertyName,
         PolymorphicDeleteBehavior deleteBehavior)
-        where TPrincipal : class
-        where TRelated : class
-        where TPivot : class
     {
-        var pivotBuilder = _modelBuilder.Entity<TPivot>();
+        var principalEntityType = _modelBuilder.Model.FindEntityType(principalType)
+            ?? throw new InvalidOperationException($"Entity '{principalType.Name}' must be part of the EF model before it can participate in a polymorphic many-to-many relationship.");
+
+        var relatedEntityType = _modelBuilder.Model.FindEntityType(relatedType)
+            ?? throw new InvalidOperationException($"Entity '{relatedType.Name}' must be part of the EF model before it can participate in a polymorphic many-to-many relationship.");
+
+        var pivotBuilder = _modelBuilder.Entity(pivotType);
+        pivotBuilder.Property(typeof(string), typePropertyName);
+        pivotBuilder.Property(pivotIdPropertyType, idPropertyName);
+        pivotBuilder.Property(pivotRelatedIdPropertyType, relatedIdPropertyName);
         pivotBuilder.HasIndex(typePropertyName, idPropertyName);
         pivotBuilder.HasIndex(relatedIdPropertyName);
 
-        var principalKeyPropertyName = principalKey is null
-            ? ExpressionHelpers.GetSingleKeyPropertyName(principalEntityType)
-            : ExpressionHelpers.GetPropertyName(principalKey);
-
-        var relatedKeyPropertyName = relatedKey is null
-            ? ExpressionHelpers.GetSingleKeyPropertyName(relatedEntityType)
-            : ExpressionHelpers.GetPropertyName(relatedKey);
-
         var principalKeyClrType = principalEntityType.FindProperty(principalKeyPropertyName)?.ClrType
-            ?? throw new InvalidOperationException($"Property '{principalKeyPropertyName}' was not found on '{typeof(TPrincipal).Name}'.");
+            ?? throw new InvalidOperationException($"Property '{principalKeyPropertyName}' was not found on '{principalType.Name}'.");
 
         var relatedKeyClrType = relatedEntityType.FindProperty(relatedKeyPropertyName)?.ClrType
-            ?? throw new InvalidOperationException($"Property '{relatedKeyPropertyName}' was not found on '{typeof(TRelated).Name}'.");
+            ?? throw new InvalidOperationException($"Property '{relatedKeyPropertyName}' was not found on '{relatedType.Name}'.");
 
         var relations = PolymorphicModelMetadata.GetOrCreateManyToManyRelations(_modelBuilder.Model);
-        var existing = relations.FirstOrDefault(relation => relation.PrincipalType == typeof(TPrincipal)
-            && relation.RelatedType == typeof(TRelated)
-            && relation.PivotType == typeof(TPivot)
+        var existing = relations.FirstOrDefault(relation => relation.PrincipalType == principalType
+            && relation.RelatedType == relatedType
+            && relation.PivotType == pivotType
             && string.Equals(relation.RelationshipName, relationshipName, StringComparison.Ordinal)
             && string.Equals(relation.InverseRelationshipName, inverseRelationshipName, StringComparison.Ordinal));
 
@@ -228,22 +341,24 @@ public sealed class PolymorphicModelBuilder
         }
 
         relations.Add(new PolymorphicModelMetadata.MorphManyToManyRelation(
-            typeof(TPrincipal),
-            typeof(TRelated),
-            typeof(TPivot),
+            principalType,
+            relatedType,
+            pivotType,
             relationshipName,
             inverseRelationshipName,
             typePropertyName,
             idPropertyName,
-            typeof(TPrincipalKey),
+            pivotIdPropertyType,
             relatedIdPropertyName,
-            typeof(TRelatedKey),
+            pivotRelatedIdPropertyType,
             principalKeyPropertyName,
             principalKeyClrType,
             relatedKeyPropertyName,
             relatedKeyClrType,
-            PolymorphicModelMetadata.GetAlias(_modelBuilder.Model, typeof(TPrincipal)),
+            PolymorphicModelMetadata.GetAlias(_modelBuilder.Model, principalType),
             deleteBehavior));
+
+        PolymorphicModelMetadata.SyncManyToManyRelations(_modelBuilder.Model, relations);
     }
 }
 
@@ -317,6 +432,8 @@ public sealed class MorphEntityBuilder<TEntity>
             references.Add(reference);
         }
 
+        PolymorphicModelMetadata.SyncReferences(_modelBuilder.Model, references);
+
         return new MorphToBuilder<TEntity, TKey>(_modelBuilder, reference);
     }
 }
@@ -365,31 +482,15 @@ public sealed class MorphToBuilder<TEntity, TKey>
             throw new ArgumentException("Inverse relationship name cannot be empty.", nameof(inverseRelationshipName));
         }
 
-        var principalEntityType = _modelBuilder.Model.FindEntityType(typeof(TPrincipal))
-            ?? throw new InvalidOperationException($"Entity '{typeof(TPrincipal).Name}' must be part of the EF model before it can participate in a polymorphic relationship.");
-
-        var principalKeyPropertyName = ownerKey is null
-            ? ExpressionHelpers.GetSingleKeyPropertyName(principalEntityType)
-            : ExpressionHelpers.GetPropertyName(ownerKey);
-
-        var alias = PolymorphicModelMetadata.GetAlias(_modelBuilder.Model, typeof(TPrincipal));
-
-        var existing = _reference.Associations.FirstOrDefault(candidate => candidate.PrincipalType == typeof(TPrincipal)
-            && string.Equals(candidate.InverseRelationshipName, inverseRelationshipName, StringComparison.Ordinal)
-            && candidate.Multiplicity == multiplicity);
-
-        if (existing is not null)
-        {
-            _reference.Associations.Remove(existing);
-        }
-
-        _reference.Associations.Add(new PolymorphicModelMetadata.MorphAssociation(
+        new PolymorphicModelBuilder(_modelBuilder).RegisterAssociation(
+            _reference.DependentType,
+            _reference.RelationshipName,
             typeof(TPrincipal),
             inverseRelationshipName,
-            principalKeyPropertyName,
-            alias,
             multiplicity,
-            deleteBehavior));
+            ownerKey is null ? null : ExpressionHelpers.GetPropertyName(ownerKey),
+            deleteBehavior);
     }
 }
+
 

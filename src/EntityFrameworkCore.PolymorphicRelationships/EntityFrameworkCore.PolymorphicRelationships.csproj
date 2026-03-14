@@ -4,14 +4,17 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>EFCorePolymorphicExtension</AssemblyName>
-    <RootNamespace>EFCorePolymorphicExtension</RootNamespace>
-    <PackageId>EFCorePolymorphicExtension</PackageId>
-    <Title>EF Core Polymorphic Extension</Title>
+    <AssemblyName>EntityFrameworkCore.PolymorphicRelationships</AssemblyName>
+    <RootNamespace>EntityFrameworkCore.PolymorphicRelationships</RootNamespace>
+    <PackageId>EntityFrameworkCore.PolymorphicRelationships</PackageId>
+    <Title>Entity Framework Core Polymorphic Relationships</Title>
     <Description>Laravel-style polymorphic relationships for Entity Framework Core without database-enforced foreign keys.</Description>
     <Version>0.1.0-alpha</Version>
-    <Authors>EFCorePolymorphicExtension</Authors>
+    <Authors>EntityFrameworkCore.PolymorphicRelationships</Authors>
     <PackageTags>ef-core;entity-framework-core;polymorphic;laravel;eloquent;relationships</PackageTags>
+    <PackageProjectUrl>https://github.com/Kjaal/EntityFrameworkCore.PolymorphicRelationships</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Kjaal/EntityFrameworkCore.PolymorphicRelationships.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IncludeSymbols>true</IncludeSymbols>
@@ -28,3 +31,4 @@
   </ItemGroup>
 
 </Project>
+

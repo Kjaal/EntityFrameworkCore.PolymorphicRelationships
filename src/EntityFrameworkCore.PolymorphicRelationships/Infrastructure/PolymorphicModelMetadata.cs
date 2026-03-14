@@ -1,59 +1,38 @@
 ﻿using Microsoft.EntityFrameworkCore.Metadata;
+using System.Text.Json;
 
-namespace EFCorePolymorphicExtension.Infrastructure;
+namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 internal static class PolymorphicModelMetadata
 {
-    private const string TypeMappingsAnnotation = "EFCorePolymorphicExtension:TypeMappings";
-    private const string ReferencesAnnotation = "EFCorePolymorphicExtension:References";
-    private const string ManyToManyAnnotation = "EFCorePolymorphicExtension:ManyToMany";
+    private const string TypeMappingsAnnotation = "EntityFrameworkCore.PolymorphicRelationships:TypeMappings";
+    private const string ReferencesAnnotation = "EntityFrameworkCore.PolymorphicRelationships:References";
+    private const string ManyToManyAnnotation = "EntityFrameworkCore.PolymorphicRelationships:ManyToMany";
+    private static readonly JsonSerializerOptions JsonOptions = new();
 
     public static List<MorphTypeMapping> GetOrCreateTypeMappings(IMutableModel model)
     {
-        if (model.FindAnnotation(TypeMappingsAnnotation)?.Value is List<MorphTypeMapping> mappings)
-        {
-            return mappings;
-        }
-
-        mappings = new List<MorphTypeMapping>();
-        model.SetAnnotation(TypeMappingsAnnotation, mappings);
-        return mappings;
+        return ParseTypeMappings(model.FindAnnotation(TypeMappingsAnnotation)?.Value as string);
     }
 
     public static List<MorphReference> GetOrCreateReferences(IMutableModel model)
     {
-        if (model.FindAnnotation(ReferencesAnnotation)?.Value is List<MorphReference> references)
-        {
-            return references;
-        }
-
-        references = new List<MorphReference>();
-        model.SetAnnotation(ReferencesAnnotation, references);
-        return references;
+        return ParseReferences(model.FindAnnotation(ReferencesAnnotation)?.Value as string);
     }
 
     public static IReadOnlyList<MorphReference> GetReferences(IReadOnlyModel model)
     {
-        return model.FindAnnotation(ReferencesAnnotation)?.Value as IReadOnlyList<MorphReference>
-            ?? Array.Empty<MorphReference>();
+        return ParseReferences(model.FindAnnotation(ReferencesAnnotation)?.Value as string);
     }
 
     public static List<MorphManyToManyRelation> GetOrCreateManyToManyRelations(IMutableModel model)
     {
-        if (model.FindAnnotation(ManyToManyAnnotation)?.Value is List<MorphManyToManyRelation> relations)
-        {
-            return relations;
-        }
-
-        relations = new List<MorphManyToManyRelation>();
-        model.SetAnnotation(ManyToManyAnnotation, relations);
-        return relations;
+        return ParseManyToManyRelations(model.FindAnnotation(ManyToManyAnnotation)?.Value as string);
     }
 
     public static IReadOnlyList<MorphManyToManyRelation> GetManyToManyRelations(IReadOnlyModel model)
     {
-        return model.FindAnnotation(ManyToManyAnnotation)?.Value as IReadOnlyList<MorphManyToManyRelation>
-            ?? Array.Empty<MorphManyToManyRelation>();
+        return ParseManyToManyRelations(model.FindAnnotation(ManyToManyAnnotation)?.Value as string);
     }
 
     public static string GetAlias(IReadOnlyModel model, Type clrType)
@@ -65,14 +44,133 @@ internal static class PolymorphicModelMetadata
 
     public static MorphTypeMapping? FindTypeMapping(IReadOnlyModel model, Type clrType)
     {
-        var mappings = model.FindAnnotation(TypeMappingsAnnotation)?.Value as IEnumerable<MorphTypeMapping>;
-        if (mappings is null)
-        {
-            return null;
-        }
-
+        var mappings = ParseTypeMappings(model.FindAnnotation(TypeMappingsAnnotation)?.Value as string);
         return mappings.FirstOrDefault(mapping => mapping.ClrType == clrType)
             ?? mappings.FirstOrDefault(mapping => mapping.ClrType.IsAssignableFrom(clrType));
+    }
+
+    public static void SyncTypeMappings(IMutableModel model, IEnumerable<MorphTypeMapping> mappings)
+    {
+        model.SetAnnotation(TypeMappingsAnnotation, JsonSerializer.Serialize(
+            mappings.Select(mapping => new StoredMorphTypeMapping(mapping.ClrType.AssemblyQualifiedName!, mapping.Alias)).ToList(),
+            JsonOptions));
+    }
+
+    public static void SyncReferences(IMutableModel model, IEnumerable<MorphReference> references)
+    {
+        model.SetAnnotation(ReferencesAnnotation, JsonSerializer.Serialize(
+            references.Select(reference => new StoredMorphReference(
+                reference.DependentType.AssemblyQualifiedName!,
+                reference.RelationshipName,
+                reference.TypePropertyName,
+                reference.IdPropertyName,
+                reference.IdPropertyType.AssemblyQualifiedName!,
+                reference.Associations.Select(association => new StoredMorphAssociation(
+                    association.PrincipalType.AssemblyQualifiedName!,
+                    association.InverseRelationshipName,
+                    association.PrincipalKeyPropertyName,
+                    association.Alias,
+                    association.Multiplicity,
+                    association.DeleteBehavior)).ToList())).ToList(),
+            JsonOptions));
+    }
+
+    public static void SyncManyToManyRelations(IMutableModel model, IEnumerable<MorphManyToManyRelation> relations)
+    {
+        model.SetAnnotation(ManyToManyAnnotation, JsonSerializer.Serialize(
+            relations.Select(relation => new StoredMorphManyToManyRelation(
+                relation.PrincipalType.AssemblyQualifiedName!,
+                relation.RelatedType.AssemblyQualifiedName!,
+                relation.PivotType.AssemblyQualifiedName!,
+                relation.RelationshipName,
+                relation.InverseRelationshipName,
+                relation.PivotTypePropertyName,
+                relation.PivotIdPropertyName,
+                relation.PivotIdPropertyType.AssemblyQualifiedName!,
+                relation.PivotRelatedIdPropertyName,
+                relation.PivotRelatedIdPropertyType.AssemblyQualifiedName!,
+                relation.PrincipalKeyPropertyName,
+                relation.PrincipalKeyType.AssemblyQualifiedName!,
+                relation.RelatedKeyPropertyName,
+                relation.RelatedKeyType.AssemblyQualifiedName!,
+                relation.PrincipalAlias,
+                relation.DeleteBehavior)).ToList(),
+            JsonOptions));
+    }
+
+    private static List<MorphTypeMapping> ParseTypeMappings(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return new List<MorphTypeMapping>();
+        }
+
+        var storedMappings = JsonSerializer.Deserialize<List<StoredMorphTypeMapping>>(json, JsonOptions) ?? new();
+        return storedMappings.Select(mapping => new MorphTypeMapping(GetRequiredType(mapping.ClrType), mapping.Alias)).ToList();
+    }
+
+    private static List<MorphReference> ParseReferences(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return new List<MorphReference>();
+        }
+
+        var references = new List<MorphReference>();
+        var storedReferences = JsonSerializer.Deserialize<List<StoredMorphReference>>(json, JsonOptions) ?? new();
+        foreach (var storedReference in storedReferences)
+        {
+            var reference = new MorphReference(
+                GetRequiredType(storedReference.DependentType),
+                storedReference.RelationshipName,
+                storedReference.TypePropertyName,
+                storedReference.IdPropertyName,
+                GetRequiredType(storedReference.IdPropertyType));
+
+            reference.Associations.AddRange(storedReference.Associations.Select(association => new MorphAssociation(
+                GetRequiredType(association.PrincipalType),
+                association.InverseRelationshipName,
+                association.PrincipalKeyPropertyName,
+                association.Alias,
+                association.Multiplicity,
+                association.DeleteBehavior)));
+
+            references.Add(reference);
+        }
+
+        return references;
+    }
+
+    private static List<MorphManyToManyRelation> ParseManyToManyRelations(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return new List<MorphManyToManyRelation>();
+        }
+
+        var storedRelations = JsonSerializer.Deserialize<List<StoredMorphManyToManyRelation>>(json, JsonOptions) ?? new();
+        return storedRelations.Select(relation => new MorphManyToManyRelation(
+            GetRequiredType(relation.PrincipalType),
+            GetRequiredType(relation.RelatedType),
+            GetRequiredType(relation.PivotType),
+            relation.RelationshipName,
+            relation.InverseRelationshipName,
+            relation.PivotTypePropertyName,
+            relation.PivotIdPropertyName,
+            GetRequiredType(relation.PivotIdPropertyType),
+            relation.PivotRelatedIdPropertyName,
+            GetRequiredType(relation.PivotRelatedIdPropertyType),
+            relation.PrincipalKeyPropertyName,
+            GetRequiredType(relation.PrincipalKeyType),
+            relation.RelatedKeyPropertyName,
+            GetRequiredType(relation.RelatedKeyType),
+            relation.PrincipalAlias,
+            relation.DeleteBehavior)).ToList();
+    }
+
+    private static Type GetRequiredType(string assemblyQualifiedTypeName)
+    {
+        return Type.GetType(assemblyQualifiedTypeName, throwOnError: true)!;
     }
 
     public static MorphReference GetRequiredReference(IReadOnlyModel model, Type dependentType, string relationshipName)
@@ -262,5 +360,42 @@ internal static class PolymorphicModelMetadata
 
         public PolymorphicDeleteBehavior DeleteBehavior { get; }
     }
+
+    private sealed record StoredMorphTypeMapping(string ClrType, string Alias);
+
+    private sealed record StoredMorphAssociation(
+        string PrincipalType,
+        string InverseRelationshipName,
+        string PrincipalKeyPropertyName,
+        string Alias,
+        MorphMultiplicity Multiplicity,
+        PolymorphicDeleteBehavior DeleteBehavior);
+
+    private sealed record StoredMorphReference(
+        string DependentType,
+        string RelationshipName,
+        string TypePropertyName,
+        string IdPropertyName,
+        string IdPropertyType,
+        List<StoredMorphAssociation> Associations);
+
+    private sealed record StoredMorphManyToManyRelation(
+        string PrincipalType,
+        string RelatedType,
+        string PivotType,
+        string RelationshipName,
+        string InverseRelationshipName,
+        string PivotTypePropertyName,
+        string PivotIdPropertyName,
+        string PivotIdPropertyType,
+        string PivotRelatedIdPropertyName,
+        string PivotRelatedIdPropertyType,
+        string PrincipalKeyPropertyName,
+        string PrincipalKeyType,
+        string RelatedKeyPropertyName,
+        string RelatedKeyType,
+        string PrincipalAlias,
+        PolymorphicDeleteBehavior DeleteBehavior);
 }
+
 

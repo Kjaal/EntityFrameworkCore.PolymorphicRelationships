@@ -5,11 +5,11 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{3F2F3B68-1660-466F-98B3-E3CB36B1742C}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EFCorePolymorphicExtension", "src\EFCorePolymorphicExtension\EFCorePolymorphicExtension.csproj", "{2340781D-E707-4885-A0B5-65295A36F04C}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EntityFrameworkCore.PolymorphicRelationships", "src\EntityFrameworkCore.PolymorphicRelationships\EntityFrameworkCore.PolymorphicRelationships.csproj", "{2340781D-E707-4885-A0B5-65295A36F04C}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{B4B8CA46-A3B9-4C2E-B0CB-D5316ED0ACBA}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EFCorePolymorphicExtension.Tests", "tests\EFCorePolymorphicExtension.Tests\EFCorePolymorphicExtension.Tests.csproj", "{0115BDBD-091A-4175-9AC4-565CAAD2CDAA}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EntityFrameworkCore.PolymorphicRelationships.Tests", "tests\EntityFrameworkCore.PolymorphicRelationships.Tests\EntityFrameworkCore.PolymorphicRelationships.Tests.csproj", "{0115BDBD-091A-4175-9AC4-565CAAD2CDAA}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -34,4 +34,5 @@ Global
 		{0115BDBD-091A-4175-9AC4-565CAAD2CDAA} = {B4B8CA46-A3B9-4C2E-B0CB-D5316ED0ACBA}
 	EndGlobalSection
 EndGlobal
+
 

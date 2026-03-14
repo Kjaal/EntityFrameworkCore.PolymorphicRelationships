@@ -1,7 +1,7 @@
-﻿using EFCorePolymorphicExtension.Infrastructure;
+﻿using EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 
-namespace EFCorePolymorphicExtension;
+namespace EntityFrameworkCore.PolymorphicRelationships;
 
 public static class DbContextOptionsBuilderExtensions
 {
@@ -10,6 +10,7 @@ public static class DbContextOptionsBuilderExtensions
         ArgumentNullException.ThrowIfNull(optionsBuilder);
 
         optionsBuilder.AddInterceptors(new PolymorphicCascadeDeleteInterceptor());
+        optionsBuilder.AddInterceptors(new PolymorphicIntegrityValidationInterceptor());
         return optionsBuilder;
     }
 
@@ -31,4 +32,5 @@ public static class DbContextOptionsBuilderExtensions
         return optionsBuilder.UsePolymorphicRelationships();
     }
 }
+
 

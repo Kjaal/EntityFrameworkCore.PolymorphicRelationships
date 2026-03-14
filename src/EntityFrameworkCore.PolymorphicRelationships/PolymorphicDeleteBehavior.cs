@@ -1,4 +1,4 @@
-﻿namespace EFCorePolymorphicExtension;
+﻿namespace EntityFrameworkCore.PolymorphicRelationships;
 
 public enum PolymorphicDeleteBehavior
 {
@@ -17,4 +17,5 @@ public enum MorphOneOfManyAggregate
     Min = 0,
     Max = 1,
 }
+
 

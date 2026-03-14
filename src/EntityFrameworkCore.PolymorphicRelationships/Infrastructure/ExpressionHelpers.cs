@@ -1,7 +1,7 @@
 ﻿using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore.Metadata;
 
-namespace EFCorePolymorphicExtension.Infrastructure;
+namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 internal static class ExpressionHelpers
 {
@@ -28,4 +28,5 @@ internal static class ExpressionHelpers
         return primaryKey.Properties[0].Name;
     }
 }
+
 

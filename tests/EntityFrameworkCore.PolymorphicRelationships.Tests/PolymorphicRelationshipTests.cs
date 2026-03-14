@@ -1,7 +1,7 @@
 ﻿using System.ComponentModel.DataAnnotations.Schema;
 using Microsoft.EntityFrameworkCore;
 
-namespace EFCorePolymorphicExtension.Tests;
+namespace EntityFrameworkCore.PolymorphicRelationships.Tests;
 
 public sealed class PolymorphicRelationshipTests
 {
@@ -495,4 +495,5 @@ public sealed class PolymorphicRelationshipTests
         public int Id { get; set; }
     }
 }
+
 

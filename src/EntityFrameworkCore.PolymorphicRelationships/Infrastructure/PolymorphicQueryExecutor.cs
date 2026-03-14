@@ -2,7 +2,7 @@
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 
-namespace EFCorePolymorphicExtension.Infrastructure;
+namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 internal static class PolymorphicQueryExecutor
 {
@@ -446,4 +446,5 @@ internal static class PolymorphicQueryExecutor
         return Expression.Lambda<Func<TEntity, TProperty>>(property, parameter);
     }
 }
+
 

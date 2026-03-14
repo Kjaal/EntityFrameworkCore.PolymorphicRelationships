@@ -1,7 +1,7 @@
 ﻿using System.Globalization;
 using System.Linq.Expressions;
 
-namespace EFCorePolymorphicExtension.Infrastructure;
+namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 internal static class PolymorphicValueConverter
 {
@@ -52,4 +52,5 @@ internal static class PolymorphicValueConverter
         return Expression.Convert(Expression.Constant(converted, nonNullableType), targetType);
     }
 }
+
 

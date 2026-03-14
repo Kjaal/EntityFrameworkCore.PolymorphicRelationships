@@ -1,4 +1,4 @@
-namespace EFCorePolymorphicExtension.Infrastructure;
+﻿namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 internal static class LaravelMorphNaming
 {
@@ -61,3 +61,4 @@ internal static class LaravelMorphNaming
         return buffer.ToString();
     }
 }
+
