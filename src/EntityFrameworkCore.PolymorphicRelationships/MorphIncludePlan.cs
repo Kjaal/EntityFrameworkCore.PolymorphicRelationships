@@ -22,4 +22,9 @@ public sealed class MorphIncludePlan
 
         return null;
     }
+
+    internal IEnumerable<KeyValuePair<Type, Delegate>> GetRegistrations()
+    {
+        return _registrations;
+    }
 }

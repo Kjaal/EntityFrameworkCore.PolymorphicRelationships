@@ -18,8 +18,25 @@ public sealed class MorphBatchLoadPlan<TDependent>
         where TPrincipal : class
     {
         ArgumentNullException.ThrowIfNull(queryTransform);
-        _registrations.Add(new MorphBatchLoadRegistration<TPrincipal>(queryTransform, _asNoTracking));
+        AddRegistration(typeof(TPrincipal), queryTransform);
         return this;
+    }
+
+    internal void AddRegistration(Type principalType, Delegate queryTransform)
+    {
+        ArgumentNullException.ThrowIfNull(principalType);
+        ArgumentNullException.ThrowIfNull(queryTransform);
+
+        typeof(MorphBatchLoadPlan<TDependent>)
+            .GetMethod(nameof(AddRegistrationCore), System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .MakeGenericMethod(principalType)
+            .Invoke(this, new object?[] { queryTransform });
+    }
+
+    private void AddRegistrationCore<TPrincipal>(Func<IQueryable<TPrincipal>, IQueryable<TPrincipal>> queryTransform)
+        where TPrincipal : class
+    {
+        _registrations.Add(new MorphBatchLoadRegistration<TPrincipal>(queryTransform, _asNoTracking));
     }
 
     internal IMorphBatchLoadRegistration? FindRegistration(Type principalType)

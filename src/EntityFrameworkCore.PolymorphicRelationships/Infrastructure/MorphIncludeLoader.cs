@@ -1,11 +1,16 @@
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 
 namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 internal static class MorphIncludeLoader
 {
+    private static readonly ConditionalWeakTable<IReadOnlyModel, ConcurrentDictionary<(Type EntityType, string PropertyName), RelationshipKind>> RelationshipKinds = new();
+
     private static readonly MethodInfo ApplyMorphManyMethod = typeof(MorphIncludeLoader)
         .GetMethod(nameof(ApplyMorphManyAsync), BindingFlags.NonPublic | BindingFlags.Static)!;
 
@@ -30,79 +35,28 @@ internal static class MorphIncludeLoader
         where TEntity : class
     {
         var entityType = typeof(TEntity);
-        var property = entityType.GetProperty(request.PropertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase)
-            ?? throw new InvalidOperationException($"Property '{request.PropertyName}' was not found on '{entityType.Name}'.");
+        var cache = RelationshipKinds.GetValue(dbContext.Model, static _ => new ConcurrentDictionary<(Type EntityType, string PropertyName), RelationshipKind>());
+        var relationshipKind = cache.GetOrAdd((entityType, request.PropertyName), key => ResolveRelationshipKind(dbContext.Model, key.EntityType, key.PropertyName));
 
-        if (IsCollectionProperty(property, out var elementType))
+        return relationshipKind.Kind switch
         {
-            return ApplyCollectionIncludeAsync(dbContext, entities, request, elementType!, asNoTracking, cancellationToken);
-        }
-
-        return ApplyReferenceIncludeAsync(dbContext, entities, request, property.PropertyType, asNoTracking, cancellationToken);
-    }
-
-    private static Task ApplyCollectionIncludeAsync<TEntity>(DbContext dbContext, IReadOnlyList<TEntity> entities, MorphIncludeQuery<TEntity>.MorphIncludeRequest request, Type elementType, bool asNoTracking, CancellationToken cancellationToken)
-        where TEntity : class
-    {
-        var entityType = typeof(TEntity);
-        var references = PolymorphicModelMetadata.GetReferences(dbContext.Model);
-
-        if (references.Any(reference => reference.DependentType == elementType
-            && reference.Associations.Any(association => association.Multiplicity == MorphMultiplicity.Many
-                && association.PrincipalType.IsAssignableFrom(entityType)
-                && string.Equals(association.InverseRelationshipName, request.PropertyName, StringComparison.Ordinal))))
-        {
-            return (Task)ApplyMorphManyMethod
-                .MakeGenericMethod(entityType, elementType)
-                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!;
-        }
-
-        if (PolymorphicModelMetadata.GetManyToManyRelations(dbContext.Model).Any(relation => relation.PrincipalType.IsAssignableFrom(entityType)
-            && relation.RelatedType == elementType
-            && string.Equals(relation.RelationshipName, request.PropertyName, StringComparison.Ordinal)))
-        {
-            return (Task)ApplyMorphToManyMethod
-                .MakeGenericMethod(entityType, elementType)
-                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!;
-        }
-
-        if (PolymorphicModelMetadata.GetManyToManyRelations(dbContext.Model).Any(relation => relation.RelatedType.IsAssignableFrom(entityType)
-            && relation.PrincipalType == elementType
-            && string.Equals(relation.InverseRelationshipName, request.PropertyName, StringComparison.Ordinal)))
-        {
-            return (Task)ApplyMorphedByManyMethod
-                .MakeGenericMethod(entityType, elementType)
-                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!;
-        }
-
-        throw new InvalidOperationException($"Property '{entityType.Name}.{request.PropertyName}' is not a registered polymorphic collection relationship.");
-    }
-
-    private static Task ApplyReferenceIncludeAsync<TEntity>(DbContext dbContext, IReadOnlyList<TEntity> entities, MorphIncludeQuery<TEntity>.MorphIncludeRequest request, Type propertyType, bool asNoTracking, CancellationToken cancellationToken)
-        where TEntity : class
-    {
-        var entityType = typeof(TEntity);
-        var references = PolymorphicModelMetadata.GetReferences(dbContext.Model);
-
-        if (references.Any(reference => reference.DependentType == entityType
-            && string.Equals(reference.RelationshipName, request.PropertyName, StringComparison.Ordinal)))
-        {
-            return (Task)ApplyMorphOwnerMethod
+            RelationshipType.MorphMany => (Task)ApplyMorphManyMethod
+                .MakeGenericMethod(entityType, relationshipKind.RelatedType!)
+                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!,
+            RelationshipType.MorphToMany => (Task)ApplyMorphToManyMethod
+                .MakeGenericMethod(entityType, relationshipKind.RelatedType!)
+                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!,
+            RelationshipType.MorphedByMany => (Task)ApplyMorphedByManyMethod
+                .MakeGenericMethod(entityType, relationshipKind.RelatedType!)
+                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!,
+            RelationshipType.MorphOwner => (Task)ApplyMorphOwnerMethod
                 .MakeGenericMethod(entityType)
-                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!;
-        }
-
-        if (references.Any(reference => reference.DependentType == propertyType
-            && reference.Associations.Any(association => association.Multiplicity == MorphMultiplicity.One
-                && association.PrincipalType.IsAssignableFrom(entityType)
-                && string.Equals(association.InverseRelationshipName, request.PropertyName, StringComparison.Ordinal))))
-        {
-            return (Task)ApplyMorphOneMethod
-                .MakeGenericMethod(entityType, propertyType)
-                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!;
-        }
-
-        throw new InvalidOperationException($"Property '{entityType.Name}.{request.PropertyName}' is not a registered polymorphic reference relationship.");
+                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!,
+            RelationshipType.MorphOne => (Task)ApplyMorphOneMethod
+                .MakeGenericMethod(entityType, relationshipKind.RelatedType!)
+                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!,
+            _ => throw new InvalidOperationException($"Property '{entityType.Name}.{request.PropertyName}' is not a registered polymorphic relationship."),
+        };
     }
 
     private static async Task ApplyMorphManyAsync<TPrincipal, TDependent>(DbContext dbContext, IReadOnlyList<TPrincipal> principals, MorphIncludeQuery<TPrincipal>.MorphIncludeRequest request, bool asNoTracking, CancellationToken cancellationToken)
@@ -112,6 +66,12 @@ internal static class MorphIncludeLoader
         var queryTransform = request.Plan?.GetQueryTransform<TDependent>();
         if (asNoTracking)
         {
+            if (request.Plan is null)
+            {
+                await dbContext.LoadMorphManyUntrackedAsync<TPrincipal, TDependent>(principals, request.PropertyName, cancellationToken);
+                return;
+            }
+
             queryTransform = ComposeNoTracking(queryTransform);
         }
 
@@ -125,6 +85,12 @@ internal static class MorphIncludeLoader
         var queryTransform = request.Plan?.GetQueryTransform<TRelated>();
         if (asNoTracking)
         {
+            if (request.Plan is null)
+            {
+                await dbContext.LoadMorphToManyUntrackedAsync<TPrincipal, TRelated>(principals, request.PropertyName, cancellationToken);
+                return;
+            }
+
             queryTransform = ComposeNoTracking(queryTransform);
         }
 
@@ -138,6 +104,12 @@ internal static class MorphIncludeLoader
         var queryTransform = request.Plan?.GetQueryTransform<TPrincipal>();
         if (asNoTracking)
         {
+            if (request.Plan is null)
+            {
+                await dbContext.LoadMorphedByManyUntrackedAsync<TRelated, TPrincipal>(relatedEntities, request.PropertyName, cancellationToken);
+                return;
+            }
+
             queryTransform = ComposeNoTracking(queryTransform);
         }
 
@@ -149,6 +121,12 @@ internal static class MorphIncludeLoader
     {
         if (asNoTracking)
         {
+            if (request.Plan is null)
+            {
+                await dbContext.LoadMorphsUntrackedAsync(dependents, request.PropertyName, cancellationToken);
+                return;
+            }
+
             await dbContext.LoadMorphsUntrackedAsync(dependents, request.PropertyName, configure: plan => CopyPlanRegistrations(request.Plan, plan), cancellationToken);
             return;
         }
@@ -168,12 +146,6 @@ internal static class MorphIncludeLoader
     {
         foreach (var principal in principals)
         {
-            if (asNoTracking)
-            {
-                await dbContext.LoadMorphOneAsync<TPrincipal, TDependent>(principal, request.PropertyName, cancellationToken);
-                continue;
-            }
-
             await dbContext.LoadMorphOneAsync<TPrincipal, TDependent>(principal, request.PropertyName, cancellationToken);
         }
     }
@@ -194,9 +166,7 @@ internal static class MorphIncludeLoader
             return;
         }
 
-        var field = typeof(MorphIncludePlan).GetField("_registrations", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        var registrations = (Dictionary<Type, Delegate>)field.GetValue(source)!;
-        foreach (var registration in registrations)
+        foreach (var registration in source.GetRegistrations())
         {
             CopyRegistration(target, registration.Key, registration.Value);
         }
@@ -205,11 +175,7 @@ internal static class MorphIncludeLoader
     private static void CopyRegistration<TDependent>(MorphBatchLoadPlan<TDependent> target, Type relatedType, Delegate queryTransform)
         where TDependent : class
     {
-        target.GetType()
-            .GetMethods(BindingFlags.Public | BindingFlags.Instance)
-            .Single(method => method.Name == nameof(MorphBatchLoadPlan<TDependent>.For) && method.IsGenericMethodDefinition)
-            .MakeGenericMethod(relatedType)
-            .Invoke(target, new object?[] { queryTransform });
+        target.AddRegistration(relatedType, queryTransform);
     }
 
     private static bool IsCollectionProperty(PropertyInfo propertyInfo, out Type? elementType)
@@ -228,5 +194,72 @@ internal static class MorphIncludeLoader
 
         elementType = propertyInfo.PropertyType.GenericTypeArguments.FirstOrDefault();
         return elementType is not null;
+    }
+
+    private static RelationshipKind ResolveRelationshipKind(IReadOnlyModel model, Type entityType, string propertyName)
+    {
+        var property = entityType.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase)
+            ?? throw new InvalidOperationException($"Property '{propertyName}' was not found on '{entityType.Name}'.");
+
+        if (IsCollectionProperty(property, out var elementType))
+        {
+            var relatedType = elementType!;
+            var references = PolymorphicModelMetadata.GetReferences(model);
+
+            if (references.Any(reference => reference.DependentType == relatedType
+                && reference.Associations.Any(association => association.Multiplicity == MorphMultiplicity.Many
+                    && association.PrincipalType.IsAssignableFrom(entityType)
+                    && string.Equals(association.InverseRelationshipName, propertyName, StringComparison.Ordinal))))
+            {
+                return new RelationshipKind(RelationshipType.MorphMany, relatedType);
+            }
+
+            if (PolymorphicModelMetadata.GetManyToManyRelations(model).Any(relation => relation.PrincipalType.IsAssignableFrom(entityType)
+                && relation.RelatedType == relatedType
+                && string.Equals(relation.RelationshipName, propertyName, StringComparison.Ordinal)))
+            {
+                return new RelationshipKind(RelationshipType.MorphToMany, relatedType);
+            }
+
+            if (PolymorphicModelMetadata.GetManyToManyRelations(model).Any(relation => relation.RelatedType.IsAssignableFrom(entityType)
+                && relation.PrincipalType == relatedType
+                && string.Equals(relation.InverseRelationshipName, propertyName, StringComparison.Ordinal)))
+            {
+                return new RelationshipKind(RelationshipType.MorphedByMany, relatedType);
+            }
+
+            return new RelationshipKind(RelationshipType.Unknown, relatedType);
+        }
+
+        var propertyType = property.PropertyType;
+        var modelReferences = PolymorphicModelMetadata.GetReferences(model);
+
+        if (modelReferences.Any(reference => reference.DependentType == entityType
+            && string.Equals(reference.RelationshipName, propertyName, StringComparison.Ordinal)))
+        {
+            return new RelationshipKind(RelationshipType.MorphOwner, propertyType);
+        }
+
+        if (modelReferences.Any(reference => reference.DependentType == propertyType
+            && reference.Associations.Any(association => association.Multiplicity == MorphMultiplicity.One
+                && association.PrincipalType.IsAssignableFrom(entityType)
+                && string.Equals(association.InverseRelationshipName, propertyName, StringComparison.Ordinal))))
+        {
+            return new RelationshipKind(RelationshipType.MorphOne, propertyType);
+        }
+
+        return new RelationshipKind(RelationshipType.Unknown, propertyType);
+    }
+
+    private readonly record struct RelationshipKind(RelationshipType Kind, Type? RelatedType);
+
+    private enum RelationshipType
+    {
+        Unknown = 0,
+        MorphMany = 1,
+        MorphToMany = 2,
+        MorphedByMany = 3,
+        MorphOwner = 4,
+        MorphOne = 5,
     }
 }

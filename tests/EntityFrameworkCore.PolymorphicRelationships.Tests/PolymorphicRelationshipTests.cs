@@ -313,6 +313,27 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task Guid_primary_keys_work_for_morph_relationships()
+    {
+        await using var dbContext = CreateGuidContext();
+        var postId = Guid.NewGuid();
+        var commentId = Guid.NewGuid();
+        var post = new GuidPost { Id = postId, Title = "Guid owner" };
+        var comment = new GuidComment { Id = commentId, Body = "Guid child" };
+
+        dbContext.AddRange(post, comment);
+        dbContext.SetMorphReference(comment, nameof(GuidComment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        Assert.Equal("guid_posts", comment.CommentableType);
+        Assert.Equal(postId, comment.CommentableId);
+
+        var owner = await dbContext.LoadMorphAsync<GuidComment, GuidPost>(comment, nameof(GuidComment.Commentable));
+        Assert.NotNull(owner);
+        Assert.Equal(postId, owner!.Id);
+    }
+
+    [Fact]
     public async Task LoadMorphLatestOfManyAsync_returns_latest_related_model()
     {
         await using var dbContext = CreateContext();
@@ -473,6 +494,16 @@ public sealed class PolymorphicRelationshipTests
         return new TestDbContext(options);
     }
 
+    private static GuidTestDbContext CreateGuidContext(string? databaseName = null)
+    {
+        var options = new DbContextOptionsBuilder<GuidTestDbContext>()
+            .UseInMemoryDatabase(databaseName ?? Guid.NewGuid().ToString("N"))
+            .UsePolymorphicRelationships()
+            .Options;
+
+        return new GuidTestDbContext(options);
+    }
+
     private sealed class TestDbContext(DbContextOptions<TestDbContext> options) : DbContext(options)
     {
         public DbSet<Post> Posts => Set<Post>();
@@ -530,6 +561,27 @@ public sealed class PolymorphicRelationshipTests
                     nameof(Post.TagsByConvention),
                     nameof(Tag.PostsByConvention),
                     "taggable");
+            });
+
+            base.OnModelCreating(modelBuilder);
+        }
+    }
+
+    private sealed class GuidTestDbContext(DbContextOptions<GuidTestDbContext> options) : DbContext(options)
+    {
+        public DbSet<GuidPost> Posts => Set<GuidPost>();
+
+        public DbSet<GuidComment> Comments => Set<GuidComment>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.UsePolymorphicRelationships(polymorphic =>
+            {
+                polymorphic.MorphMap<GuidPost>("guid_posts");
+
+                polymorphic.Entity<GuidComment>()
+                    .MorphTo<Guid?>(nameof(GuidComment.Commentable), entity => entity.CommentableType, entity => entity.CommentableId)
+                    .MorphMany<GuidPost>(nameof(GuidPost.Comments));
             });
 
             base.OnModelCreating(modelBuilder);
@@ -645,6 +697,30 @@ public sealed class PolymorphicRelationshipTests
     private sealed class ConventionTaggable
     {
         public int Id { get; set; }
+    }
+
+    private sealed class GuidPost
+    {
+        public Guid Id { get; set; }
+
+        public string Title { get; set; } = string.Empty;
+
+        [NotMapped]
+        public List<GuidComment> Comments { get; set; } = new();
+    }
+
+    private sealed class GuidComment
+    {
+        public Guid Id { get; set; }
+
+        public string Body { get; set; } = string.Empty;
+
+        public string? CommentableType { get; set; }
+
+        public Guid? CommentableId { get; set; }
+
+        [NotMapped]
+        public object? Commentable { get; set; }
     }
 }
 

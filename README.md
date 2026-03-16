@@ -43,7 +43,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             polymorphic.MorphMap<Video>("videos");
 
             polymorphic.Entity<Comment>()
-                .MorphToConvention<int>(nameof(Comment.Commentable))
+                .MorphToConvention<Guid>(nameof(Comment.Commentable))
                 .MorphMany<Post>(nameof(Post.Comments))
                 .MorphMany<Video>(nameof(Video.Comments));
 
@@ -52,12 +52,12 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .MorphOne<Post>(nameof(Post.Image))
                 .MorphOne<Video>(nameof(Video.Image));
 
-            polymorphic.MorphToManyConvention<Post, Tag, Taggable, int, int>(
+            polymorphic.MorphToManyConvention<Post, Tag, Taggable, Guid, Guid>(
                 nameof(Post.Tags),
                 nameof(Tag.Posts),
                 "taggable");
 
-            polymorphic.MorphedByManyConvention<Tag, Video, Taggable, int, int>(
+            polymorphic.MorphedByManyConvention<Tag, Video, Taggable, Guid, Guid>(
                 nameof(Tag.Videos),
                 nameof(Video.Tags),
                 "taggable");
@@ -76,7 +76,7 @@ var options = new DbContextOptionsBuilder<AppDbContext>()
 ### Persist polymorphic children through navigations
 
 ```csharp
-var post = await dbContext.Posts.FindAsync(1);
+var post = await dbContext.Posts.FindAsync(Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
 
 post!.Comments.Add(new Comment { Body = "First" });
 await dbContext.SaveChangesAsync();
@@ -104,17 +104,17 @@ await dbContext.SaveChangesAsync();
 ```csharp
 var postWithComments = await dbContext.Posts
     .IncludeMorph(entity => entity.Comments)
-    .Where(entity => entity.Id == 1)
+    .Where(entity => entity.Id == Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
     .SingleAsync();
 
 var commentWithOwner = await dbContext.Comments
     .IncludeMorph(entity => entity.Commentable)
-    .Where(entity => entity.Id == 42)
+    .Where(entity => entity.Id == Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"))
     .SingleAsync();
 
 var postWithTags = await dbContext.Posts
     .IncludeMorph(entity => entity.Tags)
-    .Where(entity => entity.Id == 1)
+    .Where(entity => entity.Id == Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
     .SingleAsync();
 
 var orderedPosts = await dbContext.Posts
@@ -128,11 +128,11 @@ var commentWithOwnerPlan = await dbContext.Comments
     .IncludeMorph(
         entity => entity.Commentable,
         plan => plan.For<Post>(query => query.Include(post => post.Author)))
-    .Where(entity => entity.Id == 42)
+    .Where(entity => entity.Id == Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"))
     .SingleAsync();
 ```
 
-`IncludeMorph(...)` supports query-shaping methods such as `Where(...)`, `OrderBy(...)`, `OrderByDescending(...)`, `Skip(...)`, `Take(...)`, `AsNoTracking()`, `ToListAsync()`, `ToArrayAsync()`, `FirstAsync()`, `SingleAsync()`, and `SelectAsync(...)`.
+`IncludeMorph(...)` supports query-shaping methods such as `Where(...)`, `OrderBy(...)`, `OrderByDescending(...)`, `Skip(...)`, `Take(...)`, `AsNoTracking()`, `ToListAsync()`, `ToArrayAsync()`, `FirstAsync()`, `FirstOrDefaultAsync()`, `SingleAsync()`, `SingleOrDefaultAsync()`, and `SelectAsync(...)`.
 
 ### Advanced loading helpers
 
@@ -153,7 +153,7 @@ var mixedInverse = await dbContext.LoadMorphManyAcrossAsync<Comment>(
 var latestComment = await dbContext.LoadMorphLatestOfManyAsync<Post, Comment, int>(
     post!,
     nameof(Post.Comments),
-    comment => comment.Id,
+    comment => comment.CreatedAtUtc,
     assignToPropertyName: nameof(Post.LatestComment));
 ```
 
@@ -174,7 +174,7 @@ using EntityFrameworkCore.PolymorphicRelationships.Attributes;
 [MorphMap("posts")]
 public sealed class Post
 {
-    public int Id { get; set; }
+    public Guid Id { get; set; }
 
     [NotMapped]
     [MorphMany(typeof(Comment), nameof(Comment.Commentable))]
@@ -187,9 +187,9 @@ public sealed class Post
 
 public sealed class Comment
 {
-    public int Id { get; set; }
+    public Guid Id { get; set; }
     public string? CommentableType { get; set; }
-    public int? CommentableId { get; set; }
+    public Guid? CommentableId { get; set; }
 
     [NotMapped]
     [MorphTo(nameof(CommentableType))]
@@ -202,7 +202,7 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
     modelBuilder.UsePolymorphicRelationshipAttributes();
 }
 
-var post = await dbContext.Posts.FindAsync(1);
+var post = await dbContext.Posts.FindAsync(Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
 post!.Comments.Add(new Comment { Body = "Created through collection" });
 await dbContext.SaveChangesAsync();
 ```
@@ -212,14 +212,14 @@ await dbContext.SaveChangesAsync();
 ```csharp
 protected override void OnModelCreating(ModelBuilder modelBuilder)
 {
-    modelBuilder.Entity<Comment>().HasMorphColumns<int>("commentable");
-    modelBuilder.Entity<Taggable>().HasMorphToManyColumns<int, int>("taggable", typeof(Tag));
+    modelBuilder.Entity<Comment>().HasMorphColumns<Guid>("commentable");
+    modelBuilder.Entity<Taggable>().HasMorphToManyColumns<Guid, Guid>("taggable", typeof(Tag));
 }
 ```
 
 ## Current capabilities
 
-- single-column owner keys
+- single-column owner keys, including `Guid` primary keys
 - convention-based and explicit morph registration
 - `morphTo`, `morphOne`, `morphMany`, `morphToMany`, and `morphedByMany`
 - one-of-many helpers with ordered EF queries
