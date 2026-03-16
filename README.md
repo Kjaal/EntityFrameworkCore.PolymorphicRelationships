@@ -92,6 +92,13 @@ dbContext.Comments.Add(comment);
 await dbContext.SaveChangesAsync();
 ```
 
+Polymorphic many-to-many relationships can also be synchronized from collection navigations:
+
+```csharp
+post.Tags.Add(tag);
+await dbContext.SaveChangesAsync();
+```
+
 ### Load polymorphic relationships with include-style syntax
 
 ```csharp
@@ -109,6 +116,13 @@ var postWithTags = await dbContext.Posts
     .IncludeMorph(entity => entity.Tags)
     .Where(entity => entity.Id == 1)
     .SingleAsync();
+
+var orderedPosts = await dbContext.Posts
+    .IncludeMorph(entity => entity.Comments)
+    .AsNoTracking()
+    .OrderByDescending(entity => entity.Id)
+    .Take(20)
+    .ToListAsync();
 ```
 
 ### Advanced loading helpers
@@ -178,6 +192,10 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 {
     modelBuilder.UsePolymorphicRelationshipAttributes();
 }
+
+var post = await dbContext.Posts.FindAsync(1);
+post!.Comments.Add(new Comment { Body = "Created through collection" });
+await dbContext.SaveChangesAsync();
 ```
 
 ## Designer helpers

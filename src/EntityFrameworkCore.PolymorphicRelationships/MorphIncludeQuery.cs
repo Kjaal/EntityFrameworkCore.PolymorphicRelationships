@@ -36,6 +36,28 @@ public sealed class MorphIncludeQuery<TEntity>
         return new MorphIncludeQuery<TEntity>(_dbContext, _query.AsNoTracking(), _propertyNames);
     }
 
+    public MorphIncludeQuery<TEntity> OrderBy<TProperty>(Expression<Func<TEntity, TProperty>> keySelector)
+    {
+        ArgumentNullException.ThrowIfNull(keySelector);
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query.OrderBy(keySelector), _propertyNames);
+    }
+
+    public MorphIncludeQuery<TEntity> OrderByDescending<TProperty>(Expression<Func<TEntity, TProperty>> keySelector)
+    {
+        ArgumentNullException.ThrowIfNull(keySelector);
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query.OrderByDescending(keySelector), _propertyNames);
+    }
+
+    public MorphIncludeQuery<TEntity> Skip(int count)
+    {
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query.Skip(count), _propertyNames);
+    }
+
+    public MorphIncludeQuery<TEntity> Take(int count)
+    {
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query.Take(count), _propertyNames);
+    }
+
     public async Task<List<TEntity>> ToListAsync(CancellationToken cancellationToken = default)
     {
         var entities = await _query.ToListAsync(cancellationToken);
@@ -77,6 +99,19 @@ public sealed class MorphIncludeQuery<TEntity>
         }
 
         return entity;
+    }
+
+    public async Task<TEntity[]> ToArrayAsync(CancellationToken cancellationToken = default)
+    {
+        var entities = await ToListAsync(cancellationToken);
+        return entities.ToArray();
+    }
+
+    public async Task<List<TResult>> SelectAsync<TResult>(Func<TEntity, TResult> selector, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(selector);
+        var entities = await ToListAsync(cancellationToken);
+        return entities.Select(selector).ToList();
     }
 
     private async Task ApplyIncludesAsync(IReadOnlyList<TEntity> entities, CancellationToken cancellationToken)

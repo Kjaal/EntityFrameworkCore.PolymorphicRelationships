@@ -136,6 +136,24 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task SavingChanges_syncs_morph_to_many_from_collection_navigation()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 16, Title = "Post" };
+        var tag = new Tag { Id = 303, Name = "tag" };
+        post.Tags.Add(tag);
+
+        dbContext.Add(post);
+        dbContext.Add(tag);
+        await dbContext.SaveChangesAsync();
+
+        var pivot = await dbContext.TagAssignments.SingleAsync();
+        Assert.Equal("posts", pivot.TaggableType);
+        Assert.Equal(post.Id, pivot.TaggableId);
+        Assert.Equal(tag.Id, pivot.TagId);
+    }
+
+    [Fact]
     public async Task LoadMorphedByMany_returns_only_owners_for_the_selected_related_model()
     {
         await using var dbContext = CreateContext();

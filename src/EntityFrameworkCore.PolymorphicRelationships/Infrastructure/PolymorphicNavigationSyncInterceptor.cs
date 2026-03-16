@@ -10,6 +10,10 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
         .GetMethods(BindingFlags.Public | BindingFlags.Static)
         .Single(method => method.Name == nameof(DbContextMorphExtensions.SetMorphReference));
 
+    private static readonly MethodInfo AttachMorphToManyMethod = typeof(DbContextMorphExtensions)
+        .GetMethods(BindingFlags.Public | BindingFlags.Static)
+        .Single(method => method.Name == nameof(DbContextMorphExtensions.AttachMorphToMany));
+
     public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
     {
         if (eventData.Context is not null)
@@ -37,6 +41,7 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
     {
         SyncMorphToAssignments(dbContext);
         SyncInverseMorphNavigations(dbContext);
+        SyncMorphToManyNavigations(dbContext);
     }
 
     private static void SyncMorphToAssignments(DbContext dbContext)
@@ -149,10 +154,177 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
         return !Equals(value, defaultValue);
     }
 
+    private static void SyncMorphToManyNavigations(DbContext dbContext)
+    {
+        foreach (var relation in PolymorphicModelMetadata.GetManyToManyRelations(dbContext.Model))
+        {
+            SyncMorphToManyPrincipalSide(dbContext, relation);
+            SyncMorphToManyRelatedSide(dbContext, relation);
+        }
+    }
+
+    private static void SyncMorphToManyPrincipalSide(DbContext dbContext, PolymorphicModelMetadata.MorphManyToManyRelation relation)
+    {
+        var principals = dbContext.ChangeTracker.Entries()
+            .Where(entry => relation.PrincipalType.IsAssignableFrom(entry.Entity.GetType()) && entry.State != EntityState.Deleted)
+            .Select(entry => entry.Entity)
+            .ToList();
+
+        if (principals.Count == 0)
+        {
+            return;
+        }
+
+        var existingPairs = LoadExistingPairs(dbContext, relation, principals);
+        foreach (var principal in principals)
+        {
+            var principalId = PolymorphicMemberAccessorCache.GetValue(dbContext, principal, relation.PrincipalKeyPropertyName);
+            if (principalId is null)
+            {
+                continue;
+            }
+
+            var principalKey = NormalizeLookupKey(principalId, relation.PrincipalKeyType);
+            var collection = PolymorphicMemberAccessorCache.GetValue(dbContext, principal, relation.RelationshipName) as System.Collections.IEnumerable;
+            if (collection is null)
+            {
+                continue;
+            }
+
+            foreach (var related in collection)
+            {
+                if (related is null)
+                {
+                    continue;
+                }
+
+                EnsureEntityTracked(dbContext, related, preferAttach: true);
+                var relatedId = PolymorphicMemberAccessorCache.GetValue(dbContext, related, relation.RelatedKeyPropertyName);
+                if (relatedId is null)
+                {
+                    continue;
+                }
+
+                var relatedKey = NormalizeLookupKey(relatedId, relation.RelatedKeyType);
+                var pair = (principalKey, relatedKey);
+                if (!existingPairs.Add(pair))
+                {
+                    continue;
+                }
+
+                AttachMorphToMany(dbContext, principal, relation.RelationshipName, related, relation.PivotType);
+            }
+        }
+    }
+
+    private static void SyncMorphToManyRelatedSide(DbContext dbContext, PolymorphicModelMetadata.MorphManyToManyRelation relation)
+    {
+        var relatedEntities = dbContext.ChangeTracker.Entries()
+            .Where(entry => relation.RelatedType.IsAssignableFrom(entry.Entity.GetType()) && entry.State != EntityState.Deleted)
+            .Select(entry => entry.Entity)
+            .ToList();
+
+        if (relatedEntities.Count == 0)
+        {
+            return;
+        }
+
+        var principals = dbContext.ChangeTracker.Entries()
+            .Where(entry => relation.PrincipalType.IsAssignableFrom(entry.Entity.GetType()) && entry.State != EntityState.Deleted)
+            .Select(entry => entry.Entity)
+            .ToList();
+
+        var existingPairs = LoadExistingPairs(dbContext, relation, principals);
+        foreach (var related in relatedEntities)
+        {
+            var relatedId = PolymorphicMemberAccessorCache.GetValue(dbContext, related, relation.RelatedKeyPropertyName);
+            if (relatedId is null)
+            {
+                continue;
+            }
+
+            var relatedKey = NormalizeLookupKey(relatedId, relation.RelatedKeyType);
+            var collection = PolymorphicMemberAccessorCache.GetValue(dbContext, related, relation.InverseRelationshipName) as System.Collections.IEnumerable;
+            if (collection is null)
+            {
+                continue;
+            }
+
+            foreach (var principal in collection)
+            {
+                if (principal is null)
+                {
+                    continue;
+                }
+
+                EnsureEntityTracked(dbContext, principal, preferAttach: true);
+                var principalId = PolymorphicMemberAccessorCache.GetValue(dbContext, principal, relation.PrincipalKeyPropertyName);
+                if (principalId is null)
+                {
+                    continue;
+                }
+
+                var principalKey = NormalizeLookupKey(principalId, relation.PrincipalKeyType);
+                var pair = (principalKey, relatedKey);
+                if (!existingPairs.Add(pair))
+                {
+                    continue;
+                }
+
+                AttachMorphToMany(dbContext, principal, relation.RelationshipName, related, relation.PivotType);
+            }
+        }
+    }
+
+    private static HashSet<(object PrincipalKey, object RelatedKey)> LoadExistingPairs(
+        DbContext dbContext,
+        PolymorphicModelMetadata.MorphManyToManyRelation relation,
+        IEnumerable<object> principals)
+    {
+        var pairs = new HashSet<(object PrincipalKey, object RelatedKey)>();
+
+        foreach (var pivot in dbContext.ChangeTracker.Entries()
+                     .Where(entry => relation.PivotType.IsAssignableFrom(entry.Entity.GetType()) && entry.State != EntityState.Deleted)
+                     .Select(entry => entry.Entity))
+        {
+            var typeAlias = PolymorphicMemberAccessorCache.GetValue(dbContext, pivot, relation.PivotTypePropertyName) as string;
+            if (!string.Equals(typeAlias, relation.PrincipalAlias, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var principalId = PolymorphicMemberAccessorCache.GetValue(dbContext, pivot, relation.PivotIdPropertyName);
+            var relatedId = PolymorphicMemberAccessorCache.GetValue(dbContext, pivot, relation.PivotRelatedIdPropertyName);
+            if (principalId is null || relatedId is null)
+            {
+                continue;
+            }
+
+            pairs.Add((
+                NormalizeLookupKey(principalId, relation.PrincipalKeyType),
+                NormalizeLookupKey(relatedId, relation.RelatedKeyType)));
+        }
+
+        return pairs;
+    }
+
+    private static object NormalizeLookupKey(object value, Type propertyType)
+    {
+        return PolymorphicValueConverter.ConvertForAssignment(value, propertyType)
+            ?? throw new InvalidOperationException($"Lookup key for '{propertyType.Name}' was null.");
+    }
+
     private static void SetMorphReference(DbContext dbContext, object dependent, string relationshipName, object principal)
     {
         SetMorphReferenceMethod
             .MakeGenericMethod(dependent.GetType(), principal.GetType())
             .Invoke(null, new object?[] { dbContext, dependent, relationshipName, principal });
+    }
+
+    private static void AttachMorphToMany(DbContext dbContext, object principal, string relationshipName, object related, Type pivotType)
+    {
+        AttachMorphToManyMethod
+            .MakeGenericMethod(principal.GetType(), related.GetType(), pivotType)
+            .Invoke(null, new object?[] { dbContext, principal, relationshipName, related, null });
     }
 }
