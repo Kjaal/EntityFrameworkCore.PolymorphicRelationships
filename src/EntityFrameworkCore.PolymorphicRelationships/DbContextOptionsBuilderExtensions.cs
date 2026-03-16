@@ -9,6 +9,7 @@ public static class DbContextOptionsBuilderExtensions
     {
         ArgumentNullException.ThrowIfNull(optionsBuilder);
 
+        optionsBuilder.AddInterceptors(new PolymorphicNavigationSyncInterceptor());
         optionsBuilder.AddInterceptors(new PolymorphicCascadeDeleteInterceptor());
         optionsBuilder.AddInterceptors(new PolymorphicIntegrityValidationInterceptor());
         return optionsBuilder;

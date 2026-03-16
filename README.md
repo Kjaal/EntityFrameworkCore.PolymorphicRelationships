@@ -9,7 +9,7 @@
 - polymorphic many-to-many relationships with explicit pivot entities
 - Laravel-style naming conventions for morph columns and pivot columns
 - attribute-based relationship discovery
-- runtime helpers for assigning, loading, and batch-loading morph relationships
+- navigation-first save behavior plus include-style polymorphic loading helpers
 - code-driven cascade delete for registered morph relationships
 - save-time integrity validation for morph keys and pivot references
 - migration/scaffolding support for designer helpers and attribute conventions
@@ -71,30 +71,47 @@ var options = new DbContextOptionsBuilder<AppDbContext>()
     .Options;
 ```
 
-## Runtime APIs
+## Usage
 
-### Assign a morph owner
+### Persist polymorphic children through navigations
 
 ```csharp
 var post = await dbContext.Posts.FindAsync(1);
-var comment = new Comment { Body = "First" };
 
-dbContext.SetMorphReference(comment, nameof(Comment.Commentable), post!);
+post!.Comments.Add(new Comment { Body = "First" });
+await dbContext.SaveChangesAsync();
+```
+
+The package synchronizes the morph type and morph id during `SaveChanges` and `SaveChangesAsync`, so adding dependents through configured inverse navigations works like a regular EF-style relationship.
+
+Direct dependent-side navigation assignment is also supported:
+
+```csharp
+var comment = new Comment { Body = "Second", Commentable = post };
 dbContext.Comments.Add(comment);
 await dbContext.SaveChangesAsync();
 ```
 
-### Load a morph owner
+### Load polymorphic relationships with include-style syntax
 
 ```csharp
-var owner = await dbContext.LoadMorphAsync(comment, nameof(Comment.Commentable));
-var typedOwner = await dbContext.LoadMorphAsync<Comment, Post>(
-    comment,
-    nameof(Comment.Commentable),
-    query => query.Include(post => post.Author));
+var postWithComments = await dbContext.Posts
+    .IncludeMorph(entity => entity.Comments)
+    .Where(entity => entity.Id == 1)
+    .SingleAsync();
+
+var commentWithOwner = await dbContext.Comments
+    .IncludeMorph(entity => entity.Commentable)
+    .Where(entity => entity.Id == 42)
+    .SingleAsync();
+
+var postWithTags = await dbContext.Posts
+    .IncludeMorph(entity => entity.Tags)
+    .Where(entity => entity.Id == 1)
+    .SingleAsync();
 ```
 
-### Batch-load mixed morph owners
+### Advanced loading helpers
 
 ```csharp
 var owners = await dbContext.LoadMorphsAsync(comments, nameof(Comment.Commentable));
@@ -105,31 +122,24 @@ var ownersWithPlans = await dbContext.LoadMorphsAsync(
     plan => plan
         .For<Post>(query => query.Include(post => post.Author))
         .For<Video>(query => query.Include(video => video.Channel)));
-```
 
-### Load inverse one-to-many morphs
-
-```csharp
-var comments = await dbContext.LoadMorphManyAsync<Post, Comment>(post, nameof(Post.Comments));
+var mixedInverse = await dbContext.LoadMorphManyAcrossAsync<Comment>(
+    principals,
+    nameof(Post.Comments));
 
 var latestComment = await dbContext.LoadMorphLatestOfManyAsync<Post, Comment, int>(
-    post,
+    post!,
     nameof(Post.Comments),
     comment => comment.Id,
     assignToPropertyName: nameof(Post.LatestComment));
 ```
 
-### Load polymorphic many-to-many relationships
+### Untracked read helpers
 
 ```csharp
-var tag = new Tag { Name = "featured" };
-dbContext.Tags.Add(tag);
-
-dbContext.AttachMorphToMany<Post, Tag, Taggable>(post, nameof(Post.Tags), tag);
-await dbContext.SaveChangesAsync();
-
-var tags = await dbContext.LoadMorphToManyAsync<Post, Tag>(post, nameof(Post.Tags));
-var posts = await dbContext.LoadMorphedByManyAsync<Tag, Post>(tag, nameof(Tag.Posts));
+var owners = await dbContext.LoadMorphsUntrackedAsync(comments, nameof(Comment.Commentable));
+var commentsByPost = await dbContext.LoadMorphManyUntrackedAsync<Post, Comment>(posts, nameof(Post.Comments));
+var tagsByPost = await dbContext.LoadMorphToManyUntrackedAsync<Post, Tag>(posts, nameof(Post.Tags));
 ```
 
 ## Attribute-based configuration

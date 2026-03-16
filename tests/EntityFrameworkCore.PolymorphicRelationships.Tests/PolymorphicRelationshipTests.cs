@@ -51,6 +51,35 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task SavingChanges_syncs_morph_many_from_principal_collection()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 3, Title = "Tracked" };
+        post.Comments.Add(new Comment { Id = 103, Body = "Created from collection" });
+
+        dbContext.Add(post);
+        await dbContext.SaveChangesAsync();
+
+        var comment = await dbContext.Comments.SingleAsync();
+        Assert.Equal("posts", comment.CommentableType);
+        Assert.Equal(post.Id, comment.CommentableId);
+    }
+
+    [Fact]
+    public async Task SavingChanges_syncs_morph_to_from_navigation_assignment()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 5, Title = "Owner" };
+        var comment = new Comment { Id = 104, Body = "Created from owner nav", Commentable = post };
+
+        dbContext.AddRange(post, comment);
+        await dbContext.SaveChangesAsync();
+
+        Assert.Equal("posts", comment.CommentableType);
+        Assert.Equal(post.Id, comment.CommentableId);
+    }
+
+    [Fact]
     public async Task Cascade_delete_is_executed_in_code_for_registered_morph_relationships()
     {
         var databaseName = Guid.NewGuid().ToString("N");
@@ -203,6 +232,66 @@ public sealed class PolymorphicRelationshipTests
         Assert.Same(video, owners[secondComment]);
         Assert.Same(post, firstComment.Commentable);
         Assert.Same(video, secondComment.Commentable);
+    }
+
+    [Fact]
+    public async Task IncludeMorph_loads_inverse_collection_like_include()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 58, Title = "Post" };
+        var comment = new Comment { Id = 703, Body = "Included" };
+
+        dbContext.AddRange(post, comment);
+        dbContext.SetMorphReference(comment, nameof(Comment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        var includedPost = await dbContext.Posts
+            .IncludeMorph(entity => entity.Comments)
+            .Where(entity => entity.Id == post.Id)
+            .SingleAsync();
+
+        Assert.Single(includedPost.Comments);
+        Assert.Equal(comment.Id, includedPost.Comments[0].Id);
+    }
+
+    [Fact]
+    public async Task IncludeMorph_loads_morph_owner_like_include()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 59, Title = "Post" };
+        var comment = new Comment { Id = 704, Body = "Included owner" };
+
+        dbContext.AddRange(post, comment);
+        dbContext.SetMorphReference(comment, nameof(Comment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        var includedComment = await dbContext.Comments
+            .IncludeMorph(entity => entity.Commentable)
+            .Where(entity => entity.Id == comment.Id)
+            .SingleAsync();
+
+        Assert.NotNull(includedComment.Commentable);
+        Assert.IsType<Post>(includedComment.Commentable);
+    }
+
+    [Fact]
+    public async Task IncludeMorph_loads_many_to_many_like_include()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 60, Title = "Post" };
+        var tag = new Tag { Id = 402, Name = "Tag" };
+
+        dbContext.AddRange(post, tag);
+        dbContext.AttachMorphToMany<Post, Tag, TagAssignment>(post, nameof(Post.Tags), tag);
+        await dbContext.SaveChangesAsync();
+
+        var includedPost = await dbContext.Posts
+            .IncludeMorph(entity => entity.Tags)
+            .Where(entity => entity.Id == post.Id)
+            .SingleAsync();
+
+        Assert.Single(includedPost.Tags);
+        Assert.Equal(tag.Id, includedPost.Tags[0].Id);
     }
 
     [Fact]
