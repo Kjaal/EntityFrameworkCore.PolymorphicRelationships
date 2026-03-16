@@ -126,6 +126,39 @@ public sealed class PolymorphicAttributeConventionTests
     }
 
     [Fact]
+    public async Task IncludeMorph_supports_per_type_eager_loading_plans()
+    {
+        var databaseName = Guid.NewGuid().ToString("N");
+
+        await using (var setupContext = CreateAttributeContext(databaseName))
+        {
+            var post = new AttributedPost
+            {
+                Id = 6,
+                Title = "Post",
+                Detail = new AttributedPostDetail { Id = 61, Summary = "Post detail" },
+            };
+            var comment = new AttributedComment { Id = 62, Body = "Comment" };
+
+            setupContext.AddRange(post, comment);
+            setupContext.SetMorphReference(comment, nameof(AttributedComment.Commentable), post);
+            await setupContext.SaveChangesAsync();
+        }
+
+        await using var eagerContext = CreateAttributeContext(databaseName);
+
+        var includedComment = await eagerContext.AttributedComments
+            .IncludeMorph(
+                entity => entity.Commentable,
+                plan => plan.For<AttributedPost>(query => query.Include(post => post.Detail)))
+            .SingleAsync();
+
+        var owner = Assert.IsType<AttributedPost>(includedComment.Commentable);
+        Assert.NotNull(owner.Detail);
+        Assert.Equal("Post detail", owner.Detail!.Summary);
+    }
+
+    [Fact]
     public async Task Designer_helpers_create_laravel_style_shadow_columns()
     {
         await using var dbContext = CreateDesignerContext();

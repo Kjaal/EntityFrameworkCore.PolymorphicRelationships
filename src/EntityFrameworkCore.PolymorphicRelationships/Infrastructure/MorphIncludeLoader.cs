@@ -6,52 +6,42 @@ namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 internal static class MorphIncludeLoader
 {
-    private static readonly MethodInfo LoadMorphManyMethod = typeof(DbContextMorphExtensions)
-        .GetMethods(BindingFlags.Public | BindingFlags.Static)
-        .Single(method => method.Name == nameof(DbContextMorphExtensions.LoadMorphManyAsync)
-            && method.IsGenericMethodDefinition
-            && method.GetParameters().Length == 4
-            && method.GetParameters()[1].ParameterType.IsGenericType);
+    private static readonly MethodInfo ApplyMorphManyMethod = typeof(MorphIncludeLoader)
+        .GetMethod(nameof(ApplyMorphManyAsync), BindingFlags.NonPublic | BindingFlags.Static)!;
 
-    private static readonly MethodInfo LoadMorphOneMethod = typeof(MorphIncludeLoader)
-        .GetMethod(nameof(LoadMorphOneCoreAsync), BindingFlags.NonPublic | BindingFlags.Static)!;
+    private static readonly MethodInfo ApplyMorphToManyMethod = typeof(MorphIncludeLoader)
+        .GetMethod(nameof(ApplyMorphToManyAsync), BindingFlags.NonPublic | BindingFlags.Static)!;
 
-    private static readonly MethodInfo LoadMorphToManyMethod = typeof(DbContextMorphExtensions)
-        .GetMethods(BindingFlags.Public | BindingFlags.Static)
-        .Single(method => method.Name == nameof(DbContextMorphExtensions.LoadMorphToManyAsync)
-            && method.IsGenericMethodDefinition
-            && method.GetParameters().Length == 4
-            && method.GetParameters()[1].ParameterType.IsGenericType);
+    private static readonly MethodInfo ApplyMorphedByManyMethod = typeof(MorphIncludeLoader)
+        .GetMethod(nameof(ApplyMorphedByManyAsync), BindingFlags.NonPublic | BindingFlags.Static)!;
 
-    private static readonly MethodInfo LoadMorphedByManyMethod = typeof(DbContextMorphExtensions)
-        .GetMethods(BindingFlags.Public | BindingFlags.Static)
-        .Single(method => method.Name == nameof(DbContextMorphExtensions.LoadMorphedByManyAsync)
-            && method.IsGenericMethodDefinition
-            && method.GetParameters().Length == 4
-            && method.GetParameters()[1].ParameterType.IsGenericType);
+    private static readonly MethodInfo ApplyMorphOwnerMethod = typeof(MorphIncludeLoader)
+        .GetMethod(nameof(ApplyMorphOwnerAsync), BindingFlags.NonPublic | BindingFlags.Static)!;
 
-    private static readonly MethodInfo LoadMorphsMethod = typeof(DbContextMorphExtensions)
-        .GetMethods(BindingFlags.Public | BindingFlags.Static)
-        .Single(method => method.Name == nameof(DbContextMorphExtensions.LoadMorphsAsync)
-            && method.IsGenericMethodDefinition
-            && method.GetParameters().Length == 4);
+    private static readonly MethodInfo ApplyMorphOneMethod = typeof(MorphIncludeLoader)
+        .GetMethod(nameof(ApplyMorphOneAsync), BindingFlags.NonPublic | BindingFlags.Static)!;
 
-    public static Task ApplyAsync<TEntity>(DbContext dbContext, IReadOnlyList<TEntity> entities, string propertyName, CancellationToken cancellationToken)
+    public static Task ApplyAsync<TEntity>(
+        DbContext dbContext,
+        IReadOnlyList<TEntity> entities,
+        MorphIncludeQuery<TEntity>.MorphIncludeRequest request,
+        bool asNoTracking,
+        CancellationToken cancellationToken)
         where TEntity : class
     {
         var entityType = typeof(TEntity);
-        var property = entityType.GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase)
-            ?? throw new InvalidOperationException($"Property '{propertyName}' was not found on '{entityType.Name}'.");
+        var property = entityType.GetProperty(request.PropertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase)
+            ?? throw new InvalidOperationException($"Property '{request.PropertyName}' was not found on '{entityType.Name}'.");
 
         if (IsCollectionProperty(property, out var elementType))
         {
-            return ApplyCollectionIncludeAsync(dbContext, entities, propertyName, elementType!, cancellationToken);
+            return ApplyCollectionIncludeAsync(dbContext, entities, request, elementType!, asNoTracking, cancellationToken);
         }
 
-        return ApplyReferenceIncludeAsync(dbContext, entities, propertyName, property.PropertyType, cancellationToken);
+        return ApplyReferenceIncludeAsync(dbContext, entities, request, property.PropertyType, asNoTracking, cancellationToken);
     }
 
-    private static Task ApplyCollectionIncludeAsync<TEntity>(DbContext dbContext, IReadOnlyList<TEntity> entities, string propertyName, Type elementType, CancellationToken cancellationToken)
+    private static Task ApplyCollectionIncludeAsync<TEntity>(DbContext dbContext, IReadOnlyList<TEntity> entities, MorphIncludeQuery<TEntity>.MorphIncludeRequest request, Type elementType, bool asNoTracking, CancellationToken cancellationToken)
         where TEntity : class
     {
         var entityType = typeof(TEntity);
@@ -60,69 +50,166 @@ internal static class MorphIncludeLoader
         if (references.Any(reference => reference.DependentType == elementType
             && reference.Associations.Any(association => association.Multiplicity == MorphMultiplicity.Many
                 && association.PrincipalType.IsAssignableFrom(entityType)
-                && string.Equals(association.InverseRelationshipName, propertyName, StringComparison.Ordinal))))
+                && string.Equals(association.InverseRelationshipName, request.PropertyName, StringComparison.Ordinal))))
         {
-            return (Task)LoadMorphManyMethod
+            return (Task)ApplyMorphManyMethod
                 .MakeGenericMethod(entityType, elementType)
-                .Invoke(null, new object?[] { dbContext, entities, propertyName, cancellationToken })!;
+                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!;
         }
 
         if (PolymorphicModelMetadata.GetManyToManyRelations(dbContext.Model).Any(relation => relation.PrincipalType.IsAssignableFrom(entityType)
             && relation.RelatedType == elementType
-            && string.Equals(relation.RelationshipName, propertyName, StringComparison.Ordinal)))
+            && string.Equals(relation.RelationshipName, request.PropertyName, StringComparison.Ordinal)))
         {
-            return (Task)LoadMorphToManyMethod
+            return (Task)ApplyMorphToManyMethod
                 .MakeGenericMethod(entityType, elementType)
-                .Invoke(null, new object?[] { dbContext, entities, propertyName, cancellationToken })!;
+                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!;
         }
 
         if (PolymorphicModelMetadata.GetManyToManyRelations(dbContext.Model).Any(relation => relation.RelatedType.IsAssignableFrom(entityType)
             && relation.PrincipalType == elementType
-            && string.Equals(relation.InverseRelationshipName, propertyName, StringComparison.Ordinal)))
+            && string.Equals(relation.InverseRelationshipName, request.PropertyName, StringComparison.Ordinal)))
         {
-            return (Task)LoadMorphedByManyMethod
+            return (Task)ApplyMorphedByManyMethod
                 .MakeGenericMethod(entityType, elementType)
-                .Invoke(null, new object?[] { dbContext, entities, propertyName, cancellationToken })!;
+                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!;
         }
 
-        throw new InvalidOperationException($"Property '{entityType.Name}.{propertyName}' is not a registered polymorphic collection relationship.");
+        throw new InvalidOperationException($"Property '{entityType.Name}.{request.PropertyName}' is not a registered polymorphic collection relationship.");
     }
 
-    private static Task ApplyReferenceIncludeAsync<TEntity>(DbContext dbContext, IReadOnlyList<TEntity> entities, string propertyName, Type propertyType, CancellationToken cancellationToken)
+    private static Task ApplyReferenceIncludeAsync<TEntity>(DbContext dbContext, IReadOnlyList<TEntity> entities, MorphIncludeQuery<TEntity>.MorphIncludeRequest request, Type propertyType, bool asNoTracking, CancellationToken cancellationToken)
         where TEntity : class
     {
         var entityType = typeof(TEntity);
         var references = PolymorphicModelMetadata.GetReferences(dbContext.Model);
 
         if (references.Any(reference => reference.DependentType == entityType
-            && string.Equals(reference.RelationshipName, propertyName, StringComparison.Ordinal)))
+            && string.Equals(reference.RelationshipName, request.PropertyName, StringComparison.Ordinal)))
         {
-            return (Task)LoadMorphsMethod
+            return (Task)ApplyMorphOwnerMethod
                 .MakeGenericMethod(entityType)
-                .Invoke(null, new object?[] { dbContext, entities, propertyName, cancellationToken })!;
+                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!;
         }
 
         if (references.Any(reference => reference.DependentType == propertyType
             && reference.Associations.Any(association => association.Multiplicity == MorphMultiplicity.One
                 && association.PrincipalType.IsAssignableFrom(entityType)
-                && string.Equals(association.InverseRelationshipName, propertyName, StringComparison.Ordinal))))
+                && string.Equals(association.InverseRelationshipName, request.PropertyName, StringComparison.Ordinal))))
         {
-            return (Task)LoadMorphOneMethod
+            return (Task)ApplyMorphOneMethod
                 .MakeGenericMethod(entityType, propertyType)
-                .Invoke(null, new object?[] { dbContext, entities, propertyName, cancellationToken })!;
+                .Invoke(null, new object?[] { dbContext, entities, request, asNoTracking, cancellationToken })!;
         }
 
-        throw new InvalidOperationException($"Property '{entityType.Name}.{propertyName}' is not a registered polymorphic reference relationship.");
+        throw new InvalidOperationException($"Property '{entityType.Name}.{request.PropertyName}' is not a registered polymorphic reference relationship.");
     }
 
-    private static async Task LoadMorphOneCoreAsync<TPrincipal, TDependent>(DbContext dbContext, IReadOnlyList<TPrincipal> principals, string propertyName, CancellationToken cancellationToken)
+    private static async Task ApplyMorphManyAsync<TPrincipal, TDependent>(DbContext dbContext, IReadOnlyList<TPrincipal> principals, MorphIncludeQuery<TPrincipal>.MorphIncludeRequest request, bool asNoTracking, CancellationToken cancellationToken)
+        where TPrincipal : class
+        where TDependent : class
+    {
+        var queryTransform = request.Plan?.GetQueryTransform<TDependent>();
+        if (asNoTracking)
+        {
+            queryTransform = ComposeNoTracking(queryTransform);
+        }
+
+        await dbContext.LoadMorphManyAsync<TPrincipal, TDependent>(principals, request.PropertyName, queryTransform, cancellationToken);
+    }
+
+    private static async Task ApplyMorphToManyAsync<TPrincipal, TRelated>(DbContext dbContext, IReadOnlyList<TPrincipal> principals, MorphIncludeQuery<TPrincipal>.MorphIncludeRequest request, bool asNoTracking, CancellationToken cancellationToken)
+        where TPrincipal : class
+        where TRelated : class
+    {
+        var queryTransform = request.Plan?.GetQueryTransform<TRelated>();
+        if (asNoTracking)
+        {
+            queryTransform = ComposeNoTracking(queryTransform);
+        }
+
+        await dbContext.LoadMorphToManyAsync<TPrincipal, TRelated>(principals, request.PropertyName, queryTransform, cancellationToken);
+    }
+
+    private static async Task ApplyMorphedByManyAsync<TRelated, TPrincipal>(DbContext dbContext, IReadOnlyList<TRelated> relatedEntities, MorphIncludeQuery<TRelated>.MorphIncludeRequest request, bool asNoTracking, CancellationToken cancellationToken)
+        where TRelated : class
+        where TPrincipal : class
+    {
+        var queryTransform = request.Plan?.GetQueryTransform<TPrincipal>();
+        if (asNoTracking)
+        {
+            queryTransform = ComposeNoTracking(queryTransform);
+        }
+
+        await dbContext.LoadMorphedByManyAsync<TRelated, TPrincipal>(relatedEntities, request.PropertyName, queryTransform, cancellationToken);
+    }
+
+    private static async Task ApplyMorphOwnerAsync<TDependent>(DbContext dbContext, IReadOnlyList<TDependent> dependents, MorphIncludeQuery<TDependent>.MorphIncludeRequest request, bool asNoTracking, CancellationToken cancellationToken)
+        where TDependent : class
+    {
+        if (asNoTracking)
+        {
+            await dbContext.LoadMorphsUntrackedAsync(dependents, request.PropertyName, configure: plan => CopyPlanRegistrations(request.Plan, plan), cancellationToken);
+            return;
+        }
+
+        if (request.Plan is null)
+        {
+            await dbContext.LoadMorphsAsync(dependents, request.PropertyName, cancellationToken);
+            return;
+        }
+
+        await dbContext.LoadMorphsAsync(dependents, request.PropertyName, configure: plan => CopyPlanRegistrations(request.Plan, plan), cancellationToken);
+    }
+
+    private static async Task ApplyMorphOneAsync<TPrincipal, TDependent>(DbContext dbContext, IReadOnlyList<TPrincipal> principals, MorphIncludeQuery<TPrincipal>.MorphIncludeRequest request, bool asNoTracking, CancellationToken cancellationToken)
         where TPrincipal : class
         where TDependent : class
     {
         foreach (var principal in principals)
         {
-            await dbContext.LoadMorphOneAsync<TPrincipal, TDependent>(principal, propertyName, cancellationToken);
+            if (asNoTracking)
+            {
+                await dbContext.LoadMorphOneAsync<TPrincipal, TDependent>(principal, request.PropertyName, cancellationToken);
+                continue;
+            }
+
+            await dbContext.LoadMorphOneAsync<TPrincipal, TDependent>(principal, request.PropertyName, cancellationToken);
         }
+    }
+
+    private static Func<IQueryable<TEntity>, IQueryable<TEntity>> ComposeNoTracking<TEntity>(Func<IQueryable<TEntity>, IQueryable<TEntity>>? queryTransform)
+        where TEntity : class
+    {
+        return queryTransform is null
+            ? query => query.AsNoTracking()
+            : query => queryTransform(query.AsNoTracking());
+    }
+
+    private static void CopyPlanRegistrations<TDependent>(MorphIncludePlan? source, MorphBatchLoadPlan<TDependent> target)
+        where TDependent : class
+    {
+        if (source is null)
+        {
+            return;
+        }
+
+        var field = typeof(MorphIncludePlan).GetField("_registrations", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var registrations = (Dictionary<Type, Delegate>)field.GetValue(source)!;
+        foreach (var registration in registrations)
+        {
+            CopyRegistration(target, registration.Key, registration.Value);
+        }
+    }
+
+    private static void CopyRegistration<TDependent>(MorphBatchLoadPlan<TDependent> target, Type relatedType, Delegate queryTransform)
+        where TDependent : class
+    {
+        target.GetType()
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Single(method => method.Name == nameof(MorphBatchLoadPlan<TDependent>.For) && method.IsGenericMethodDefinition)
+            .MakeGenericMethod(relatedType)
+            .Invoke(target, new object?[] { queryTransform });
     }
 
     private static bool IsCollectionProperty(PropertyInfo propertyInfo, out Type? elementType)

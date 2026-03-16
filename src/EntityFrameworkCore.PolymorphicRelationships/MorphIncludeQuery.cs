@@ -9,53 +9,63 @@ public sealed class MorphIncludeQuery<TEntity>
 {
     private readonly DbContext _dbContext;
     private readonly IQueryable<TEntity> _query;
-    private readonly List<string> _propertyNames;
+    private readonly List<MorphIncludeRequest> _requests;
+    private readonly bool _asNoTracking;
 
-    internal MorphIncludeQuery(DbContext dbContext, IQueryable<TEntity> query, IEnumerable<string> propertyNames)
+    internal MorphIncludeQuery(DbContext dbContext, IQueryable<TEntity> query, IEnumerable<MorphIncludeRequest> requests, bool asNoTracking = false)
     {
         _dbContext = dbContext;
         _query = query;
-        _propertyNames = propertyNames.ToList();
+        _requests = requests.ToList();
+        _asNoTracking = asNoTracking;
     }
 
     public MorphIncludeQuery<TEntity> IncludeMorph<TProperty>(Expression<Func<TEntity, TProperty>> navigationExpression)
     {
         ArgumentNullException.ThrowIfNull(navigationExpression);
-        _propertyNames.Add(ExpressionHelpers.GetPropertyName(navigationExpression));
-        return this;
+        return IncludeMorph(navigationExpression, configure: null);
+    }
+
+    public MorphIncludeQuery<TEntity> IncludeMorph<TProperty>(Expression<Func<TEntity, TProperty>> navigationExpression, Action<MorphIncludePlan>? configure)
+    {
+        ArgumentNullException.ThrowIfNull(navigationExpression);
+        var plan = CreatePlan(configure);
+        var requests = _requests.ToList();
+        requests.Add(new MorphIncludeRequest(ExpressionHelpers.GetPropertyName(navigationExpression), plan));
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query, requests, _asNoTracking);
     }
 
     public MorphIncludeQuery<TEntity> Where(Expression<Func<TEntity, bool>> predicate)
     {
         ArgumentNullException.ThrowIfNull(predicate);
-        return new MorphIncludeQuery<TEntity>(_dbContext, _query.Where(predicate), _propertyNames);
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query.Where(predicate), _requests, _asNoTracking);
     }
 
     public MorphIncludeQuery<TEntity> AsNoTracking()
     {
-        return new MorphIncludeQuery<TEntity>(_dbContext, _query.AsNoTracking(), _propertyNames);
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query.AsNoTracking(), _requests, asNoTracking: true);
     }
 
     public MorphIncludeQuery<TEntity> OrderBy<TProperty>(Expression<Func<TEntity, TProperty>> keySelector)
     {
         ArgumentNullException.ThrowIfNull(keySelector);
-        return new MorphIncludeQuery<TEntity>(_dbContext, _query.OrderBy(keySelector), _propertyNames);
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query.OrderBy(keySelector), _requests, _asNoTracking);
     }
 
     public MorphIncludeQuery<TEntity> OrderByDescending<TProperty>(Expression<Func<TEntity, TProperty>> keySelector)
     {
         ArgumentNullException.ThrowIfNull(keySelector);
-        return new MorphIncludeQuery<TEntity>(_dbContext, _query.OrderByDescending(keySelector), _propertyNames);
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query.OrderByDescending(keySelector), _requests, _asNoTracking);
     }
 
     public MorphIncludeQuery<TEntity> Skip(int count)
     {
-        return new MorphIncludeQuery<TEntity>(_dbContext, _query.Skip(count), _propertyNames);
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query.Skip(count), _requests, _asNoTracking);
     }
 
     public MorphIncludeQuery<TEntity> Take(int count)
     {
-        return new MorphIncludeQuery<TEntity>(_dbContext, _query.Take(count), _propertyNames);
+        return new MorphIncludeQuery<TEntity>(_dbContext, _query.Take(count), _requests, _asNoTracking);
     }
 
     public async Task<List<TEntity>> ToListAsync(CancellationToken cancellationToken = default)
@@ -116,14 +126,30 @@ public sealed class MorphIncludeQuery<TEntity>
 
     private async Task ApplyIncludesAsync(IReadOnlyList<TEntity> entities, CancellationToken cancellationToken)
     {
-        if (entities.Count == 0 || _propertyNames.Count == 0)
+        if (entities.Count == 0 || _requests.Count == 0)
         {
             return;
         }
 
-        foreach (var propertyName in _propertyNames.Distinct(StringComparer.Ordinal))
+        foreach (var request in _requests
+                     .GroupBy(item => item.PropertyName, StringComparer.Ordinal)
+                     .Select(group => group.Last()))
         {
-            await MorphIncludeLoader.ApplyAsync(_dbContext, entities, propertyName, cancellationToken);
+            await MorphIncludeLoader.ApplyAsync(_dbContext, entities, request, _asNoTracking, cancellationToken);
         }
     }
+
+    private static MorphIncludePlan? CreatePlan(Action<MorphIncludePlan>? configure)
+    {
+        if (configure is null)
+        {
+            return null;
+        }
+
+        var plan = new MorphIncludePlan();
+        configure(plan);
+        return plan;
+    }
+
+    internal sealed record MorphIncludeRequest(string PropertyName, MorphIncludePlan? Plan);
 }

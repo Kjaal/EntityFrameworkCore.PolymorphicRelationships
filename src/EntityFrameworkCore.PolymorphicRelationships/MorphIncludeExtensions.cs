@@ -13,10 +13,30 @@ public static class MorphIncludeExtensions
         Expression<Func<TEntity, TProperty>> navigationExpression)
         where TEntity : class
     {
+        return IncludeMorph(dbSet, navigationExpression, configure: null);
+    }
+
+    public static MorphIncludeQuery<TEntity> IncludeMorph<TEntity, TProperty>(
+        this DbSet<TEntity> dbSet,
+        Expression<Func<TEntity, TProperty>> navigationExpression,
+        Action<MorphIncludePlan>? configure)
+        where TEntity : class
+    {
         ArgumentNullException.ThrowIfNull(dbSet);
         ArgumentNullException.ThrowIfNull(navigationExpression);
 
         var dbContext = ((IInfrastructure<IServiceProvider>)dbSet).Instance.GetRequiredService<ICurrentDbContext>().Context;
-        return new MorphIncludeQuery<TEntity>(dbContext, dbSet, new[] { ExpressionHelpers.GetPropertyName(navigationExpression) });
+        var plan = configure is null ? null : BuildPlan(configure);
+        return new MorphIncludeQuery<TEntity>(
+            dbContext,
+            dbSet,
+            new[] { new MorphIncludeQuery<TEntity>.MorphIncludeRequest(ExpressionHelpers.GetPropertyName(navigationExpression), plan) });
+    }
+
+    private static MorphIncludePlan BuildPlan(Action<MorphIncludePlan> configure)
+    {
+        var plan = new MorphIncludePlan();
+        configure(plan);
+        return plan;
     }
 }

@@ -123,7 +123,16 @@ var orderedPosts = await dbContext.Posts
     .OrderByDescending(entity => entity.Id)
     .Take(20)
     .ToListAsync();
+
+var commentWithOwnerPlan = await dbContext.Comments
+    .IncludeMorph(
+        entity => entity.Commentable,
+        plan => plan.For<Post>(query => query.Include(post => post.Author)))
+    .Where(entity => entity.Id == 42)
+    .SingleAsync();
 ```
+
+`IncludeMorph(...)` supports query-shaping methods such as `Where(...)`, `OrderBy(...)`, `OrderByDescending(...)`, `Skip(...)`, `Take(...)`, `AsNoTracking()`, `ToListAsync()`, `ToArrayAsync()`, `FirstAsync()`, `SingleAsync()`, and `SelectAsync(...)`.
 
 ### Advanced loading helpers
 
