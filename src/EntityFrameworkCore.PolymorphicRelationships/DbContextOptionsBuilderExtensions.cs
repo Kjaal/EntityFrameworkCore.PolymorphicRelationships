@@ -1,5 +1,7 @@
-﻿using EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
+using EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
+using EntityFrameworkCore.PolymorphicRelationships.Infrastructure.Query;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 
 namespace EntityFrameworkCore.PolymorphicRelationships;
 
@@ -11,6 +13,8 @@ public static class DbContextOptionsBuilderExtensions
     {
         ArgumentNullException.ThrowIfNull(optionsBuilder);
 
+        var infrastructure = (IDbContextOptionsBuilderInfrastructure)optionsBuilder;
+        infrastructure.AddOrUpdateExtension(new PolymorphicRelationalOptionsExtension());
         optionsBuilder.AddInterceptors(QueryExpressionInterceptor);
         optionsBuilder.AddInterceptors(new PolymorphicNavigationSyncInterceptor());
         optionsBuilder.AddInterceptors(new PolymorphicCascadeDeleteInterceptor());
