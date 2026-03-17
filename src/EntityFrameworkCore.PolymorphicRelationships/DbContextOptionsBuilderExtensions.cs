@@ -5,10 +5,13 @@ namespace EntityFrameworkCore.PolymorphicRelationships;
 
 public static class DbContextOptionsBuilderExtensions
 {
+    private static readonly PolymorphicQueryExpressionInterceptor QueryExpressionInterceptor = new();
+
     public static DbContextOptionsBuilder UsePolymorphicRelationships(this DbContextOptionsBuilder optionsBuilder)
     {
         ArgumentNullException.ThrowIfNull(optionsBuilder);
 
+        optionsBuilder.AddInterceptors(QueryExpressionInterceptor);
         optionsBuilder.AddInterceptors(new PolymorphicNavigationSyncInterceptor());
         optionsBuilder.AddInterceptors(new PolymorphicCascadeDeleteInterceptor());
         optionsBuilder.AddInterceptors(new PolymorphicIntegrityValidationInterceptor());

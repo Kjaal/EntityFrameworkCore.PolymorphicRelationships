@@ -330,6 +330,67 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task Native_select_projects_polymorphic_collection_like_include_results()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 61, Title = "Post" };
+        var firstComment = new Comment { Id = 705, Body = "First" };
+        var secondComment = new Comment { Id = 706, Body = "Second" };
+
+        dbContext.AddRange(post, firstComment, secondComment);
+        dbContext.SetMorphReference(firstComment, nameof(Comment.Commentable), post);
+        dbContext.SetMorphReference(secondComment, nameof(Comment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        var selected = await dbContext.Posts
+            .Where(entity => entity.Id == post.Id)
+            .Select(entity => new PostProjection
+            {
+                Title = entity.Title,
+                Comments = entity.Comments,
+            })
+            .SingleAsync();
+
+        var included = await dbContext.Posts
+            .IncludeMorph(entity => entity.Comments)
+            .Where(entity => entity.Id == post.Id)
+            .SingleAsync();
+
+        Assert.Equal(included.Title, selected.Title);
+        Assert.Equal(included.Comments.Select(entity => entity.Id).OrderBy(entity => entity), selected.Comments.Select(entity => entity.Id).OrderBy(entity => entity));
+    }
+
+    [Fact]
+    public async Task Native_select_projects_polymorphic_owner_like_include_results()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 62, Title = "Post" };
+        var comment = new Comment { Id = 707, Body = "Owner" };
+
+        dbContext.AddRange(post, comment);
+        dbContext.SetMorphReference(comment, nameof(Comment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        var selected = await dbContext.Comments
+            .Where(entity => entity.Id == comment.Id)
+            .Select(entity => new CommentProjection
+            {
+                Body = entity.Body,
+                Commentable = entity.Commentable,
+            })
+            .SingleAsync();
+
+        var included = await dbContext.Comments
+            .IncludeMorph(entity => entity.Commentable)
+            .Where(entity => entity.Id == comment.Id)
+            .SingleAsync();
+
+        Assert.Equal(included.Body, selected.Body);
+        Assert.IsType<Post>(selected.Commentable);
+        Assert.Equal(((Post)included.Commentable!).Id, ((Post)selected.Commentable!).Id);
+    }
+
+    [Fact]
     public async Task Guid_primary_keys_work_for_morph_relationships()
     {
         await using var dbContext = CreateGuidContext();
@@ -741,6 +802,20 @@ public sealed class PolymorphicRelationshipTests
     private sealed class ConventionTaggable
     {
         public int Id { get; set; }
+    }
+
+    private sealed class PostProjection
+    {
+        public string Title { get; set; } = string.Empty;
+
+        public List<Comment> Comments { get; set; } = new();
+    }
+
+    private sealed class CommentProjection
+    {
+        public string Body { get; set; } = string.Empty;
+
+        public object? Commentable { get; set; }
     }
 
     private sealed class GuidPost
