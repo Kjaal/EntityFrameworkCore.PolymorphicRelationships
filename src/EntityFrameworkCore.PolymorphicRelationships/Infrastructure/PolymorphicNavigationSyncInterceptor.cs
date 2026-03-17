@@ -58,6 +58,12 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
                 var owner = PolymorphicMemberAccessorCache.GetValue(dbContext, entry.Entity, reference.RelationshipName);
                 if (owner is null)
                 {
+                    if (entry.State != EntityState.Added)
+                    {
+                        entry.Property(reference.TypePropertyName).CurrentValue = null;
+                        entry.Property(reference.IdPropertyName).CurrentValue = null;
+                    }
+
                     continue;
                 }
 

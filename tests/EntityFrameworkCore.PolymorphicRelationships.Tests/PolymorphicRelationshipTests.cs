@@ -80,6 +80,23 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task SavingChanges_clears_morph_columns_when_navigation_is_cleared()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 6, Title = "Owner" };
+        var comment = new Comment { Id = 105, Body = "Owned", Commentable = post };
+
+        dbContext.AddRange(post, comment);
+        await dbContext.SaveChangesAsync();
+
+        comment.Commentable = null;
+        await dbContext.SaveChangesAsync();
+
+        Assert.Null(comment.CommentableType);
+        Assert.Null(comment.CommentableId);
+    }
+
+    [Fact]
     public async Task Cascade_delete_is_executed_in_code_for_registered_morph_relationships()
     {
         var databaseName = Guid.NewGuid().ToString("N");
@@ -334,6 +351,19 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task Duplicate_morph_aliases_are_rejected()
+    {
+        var options = new DbContextOptionsBuilder<DuplicateAliasDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"))
+            .UsePolymorphicRelationships()
+            .Options;
+
+        await using var dbContext = new DuplicateAliasDbContext(options);
+        var exception = Assert.Throws<InvalidOperationException>(() => dbContext.Model);
+        Assert.Contains("Morph alias 'shared' is already registered", exception.Message);
+    }
+
+    [Fact]
     public async Task LoadMorphLatestOfManyAsync_returns_latest_related_model()
     {
         await using var dbContext = CreateContext();
@@ -582,6 +612,20 @@ public sealed class PolymorphicRelationshipTests
                 polymorphic.Entity<GuidComment>()
                     .MorphTo<Guid?>(nameof(GuidComment.Commentable), entity => entity.CommentableType, entity => entity.CommentableId)
                     .MorphMany<GuidPost>(nameof(GuidPost.Comments));
+            });
+
+            base.OnModelCreating(modelBuilder);
+        }
+    }
+
+    private sealed class DuplicateAliasDbContext(DbContextOptions<DuplicateAliasDbContext> options) : DbContext(options)
+    {
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.UsePolymorphicRelationships(polymorphic =>
+            {
+                polymorphic.MorphMap<Post>("shared");
+                polymorphic.MorphMap<Video>("shared");
             });
 
             base.OnModelCreating(modelBuilder);
