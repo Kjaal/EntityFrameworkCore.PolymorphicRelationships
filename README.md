@@ -158,6 +158,37 @@ var projectedComment = await dbContext.Comments
 
 Native `Select(...)` projection support works for polymorphic navigations without introducing a separate projection API. Projection-time polymorphic navigation loading is resolved after the root query is materialized, which keeps the syntax native while avoiding breaking changes to standard EF Core query behavior.
 
+### Native translated query support
+
+```csharp
+var postsWithComments = await dbContext.Posts
+    .Where(entity => entity.Comments.Any())
+    .ToListAsync();
+
+var postsWithAtLeastOneComment = await dbContext.Posts
+    .Where(entity => entity.Comments.Count > 0)
+    .ToListAsync();
+
+var orderedComments = await dbContext.Comments
+    .Where(entity => entity.CommentableType == "posts")
+    .OrderBy(entity => ((Post)entity.Commentable!).Title)
+    .ToListAsync();
+```
+
+The package currently supports native translated query shapes for:
+
+- `morphMany.Any()`
+- `morphMany.Count > 0`
+- owner-property ordering for `morphTo` when the owner type is explicitly cast in the query
+
+Provider support for translated query shapes is prioritized in this order:
+
+1. PostgreSQL
+2. SQLite
+3. SQL Server
+
+Native translated query support is intentionally narrower than native `Select(...)` projection support. Unsupported shapes should continue to use `IncludeMorph(...)` or the lower-level helper APIs.
+
 ### Advanced loading helpers
 
 ```csharp
@@ -252,6 +283,7 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 - code-executed cascade delete interception
 - save-time morph integrity validation
 - migration snapshot and scaffolding compatibility for supported helpers
+- translated relational query support for selected native `Where(...)` / `OrderBy(...)` polymorphic shapes
 
 ## Current limitations
 
@@ -259,6 +291,7 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 - many-to-many relationships require an explicit pivot entity
 - composite owner keys are not supported
 - one-of-many selection is limited to a single ordering expression
+- translated native query support currently focuses on `Any()`, `Count > 0`, and owner-property ordering rather than the full space of polymorphic query expressions
 - Laravel features such as `morphToMany` custom pivot behavior and broader relationship macros are not yet fully mirrored
 
 ## Roadmap

@@ -37,6 +37,11 @@ internal sealed class PolymorphicMethodCallTranslator(
             var genericMethod = method;
             method = method.GetGenericMethodDefinition();
 
+            if (method == MorphCollectionCountMethod)
+            {
+                return TranslateMorphCollectionCount(arguments);
+            }
+
             if (method == MorphCollectionAnyMethod)
             {
                 return TranslateMorphCollectionAny(arguments);
@@ -48,12 +53,40 @@ internal sealed class PolymorphicMethodCallTranslator(
             }
         }
 
-        if (method == MorphCollectionCountMethod)
+        return null;
+    }
+
+    private SqlExpression? TranslateMorphCollectionCount(IReadOnlyList<SqlExpression> arguments)
+    {
+        if (arguments.Count != 4)
         {
-            throw new NotSupportedException("Provider-aware relational translation for polymorphic query markers is not implemented yet.");
+            return null;
         }
 
-        return null;
+        if (!TryResolveMorphMany(arguments, out var association, out var reference, out var dependentEntityType, out var ownerId, out var dependentKeyColumn, out var dependentTypeColumn, out var selectExpression))
+        {
+            return null;
+        }
+
+        var alias = sqlExpressionFactory.Constant(association.Alias, typeMappingSource.FindMapping(typeof(string)));
+        var predicate = sqlExpressionFactory.AndAlso(
+            sqlExpressionFactory.Equal(dependentTypeColumn, alias),
+            sqlExpressionFactory.Equal(dependentKeyColumn, ownerId));
+
+        selectExpression.ClearOrdering();
+        selectExpression.ApplyPredicate(predicate);
+
+        var dependentKeyProperty = dependentEntityType.FindProperty(reference.IdPropertyName)!;
+        var countExpression = sqlExpressionFactory.Function(
+            "COUNT",
+            new[] { dependentKeyColumn },
+            nullable: false,
+            argumentsPropagateNullability: new[] { false },
+            typeof(int),
+            dependentKeyProperty.GetRelationalTypeMapping());
+
+        selectExpression.AddToProjection(countExpression);
+        return new ScalarSubqueryExpression(selectExpression);
     }
 
     private SqlExpression? TranslateMorphOwnerProperty(MethodInfo genericMethod, IReadOnlyList<SqlExpression> arguments)
@@ -139,58 +172,11 @@ internal sealed class PolymorphicMethodCallTranslator(
             return null;
         }
 
-        var principalTypeName = (arguments[1] as SqlConstantExpression)?.Value as string;
-        var dependentTypeName = (arguments[2] as SqlConstantExpression)?.Value as string;
-        var relationshipName = (arguments[3] as SqlConstantExpression)?.Value as string;
-
-        if (string.IsNullOrWhiteSpace(principalTypeName)
-            || string.IsNullOrWhiteSpace(dependentTypeName)
-            || string.IsNullOrWhiteSpace(relationshipName))
+        if (!TryResolveMorphMany(arguments, out var association, out _, out _, out var ownerId, out var dependentKeyColumn, out var dependentTypeColumn, out var selectExpression))
         {
             return null;
         }
 
-        var principalType = Type.GetType(principalTypeName, throwOnError: false);
-        var dependentType = Type.GetType(dependentTypeName, throwOnError: false);
-        if (principalType is null || dependentType is null)
-        {
-            return null;
-        }
-
-        var model = currentDbContext.Context.Model;
-        var (reference, association) = PolymorphicModelMetadata.GetRequiredInverse(model, principalType, dependentType, relationshipName, MorphMultiplicity.Many);
-        var dependentEntityType = model.FindEntityType(dependentType);
-        if (dependentEntityType is null)
-        {
-            return null;
-        }
-
-        var dependentKeyProperty = dependentEntityType.FindProperty(reference.IdPropertyName);
-        var dependentTypeProperty = dependentEntityType.FindProperty(reference.TypePropertyName);
-        if (dependentKeyProperty is null || dependentTypeProperty is null)
-        {
-            return null;
-        }
-
-        var selectExpression = sqlExpressionFactory.Select(dependentEntityType);
-        var table = selectExpression.Tables.Single();
-        var storeObject = StoreObjectIdentifier.Table(dependentEntityType.GetTableName()!, dependentEntityType.GetSchema());
-
-        var dependentKeyColumn = selectExpression.CreateColumnExpression(
-            table,
-            dependentKeyProperty.GetColumnName(storeObject)!,
-            dependentKeyProperty.ClrType,
-            dependentKeyProperty.GetRelationalTypeMapping(),
-            dependentKeyProperty.IsColumnNullable(storeObject));
-
-        var dependentTypeColumn = selectExpression.CreateColumnExpression(
-            table,
-            dependentTypeProperty.GetColumnName(storeObject)!,
-            dependentTypeProperty.ClrType,
-            dependentTypeProperty.GetRelationalTypeMapping(),
-            dependentTypeProperty.IsColumnNullable(storeObject));
-
-        var ownerId = sqlExpressionFactory.ApplyTypeMapping(arguments[0], dependentKeyProperty.GetRelationalTypeMapping());
         var alias = sqlExpressionFactory.Constant(association.Alias, typeMappingSource.FindMapping(typeof(string)));
         var predicate = sqlExpressionFactory.AndAlso(
             sqlExpressionFactory.Equal(dependentTypeColumn, alias),
@@ -199,5 +185,78 @@ internal sealed class PolymorphicMethodCallTranslator(
         selectExpression.ClearOrdering();
         selectExpression.ApplyPredicate(predicate);
         return sqlExpressionFactory.Exists(selectExpression);
+    }
+
+    private bool TryResolveMorphMany(
+        IReadOnlyList<SqlExpression> arguments,
+        out PolymorphicModelMetadata.MorphAssociation association,
+        out PolymorphicModelMetadata.MorphReference reference,
+        out Microsoft.EntityFrameworkCore.Metadata.IEntityType dependentEntityType,
+        out SqlExpression ownerId,
+        out ColumnExpression dependentKeyColumn,
+        out ColumnExpression dependentTypeColumn,
+        out SelectExpression selectExpression)
+    {
+        association = null!;
+        reference = null!;
+        dependentEntityType = null!;
+        ownerId = null!;
+        dependentKeyColumn = null!;
+        dependentTypeColumn = null!;
+        selectExpression = null!;
+
+        var principalTypeName = (arguments[1] as SqlConstantExpression)?.Value as string;
+        var dependentTypeName = (arguments[2] as SqlConstantExpression)?.Value as string;
+        var relationshipName = (arguments[3] as SqlConstantExpression)?.Value as string;
+
+        if (string.IsNullOrWhiteSpace(principalTypeName)
+            || string.IsNullOrWhiteSpace(dependentTypeName)
+            || string.IsNullOrWhiteSpace(relationshipName))
+        {
+            return false;
+        }
+
+        var principalType = Type.GetType(principalTypeName, throwOnError: false);
+        var dependentType = Type.GetType(dependentTypeName, throwOnError: false);
+        if (principalType is null || dependentType is null)
+        {
+            return false;
+        }
+
+        var model = currentDbContext.Context.Model;
+        (reference, association) = PolymorphicModelMetadata.GetRequiredInverse(model, principalType, dependentType, relationshipName, MorphMultiplicity.Many);
+        dependentEntityType = model.FindEntityType(dependentType)!;
+        if (dependentEntityType is null)
+        {
+            return false;
+        }
+
+        var dependentKeyProperty = dependentEntityType.FindProperty(reference.IdPropertyName);
+        var dependentTypeProperty = dependentEntityType.FindProperty(reference.TypePropertyName);
+        if (dependentKeyProperty is null || dependentTypeProperty is null)
+        {
+            return false;
+        }
+
+        selectExpression = sqlExpressionFactory.Select(dependentEntityType);
+        var table = selectExpression.Tables.Single();
+        var storeObject = StoreObjectIdentifier.Table(dependentEntityType.GetTableName()!, dependentEntityType.GetSchema());
+
+        dependentKeyColumn = selectExpression.CreateColumnExpression(
+            table,
+            dependentKeyProperty.GetColumnName(storeObject)!,
+            dependentKeyProperty.ClrType,
+            dependentKeyProperty.GetRelationalTypeMapping(),
+            dependentKeyProperty.IsColumnNullable(storeObject));
+
+        dependentTypeColumn = selectExpression.CreateColumnExpression(
+            table,
+            dependentTypeProperty.GetColumnName(storeObject)!,
+            dependentTypeProperty.ClrType,
+            dependentTypeProperty.GetRelationalTypeMapping(),
+            dependentTypeProperty.IsColumnNullable(storeObject));
+
+        ownerId = sqlExpressionFactory.ApplyTypeMapping(arguments[0], dependentKeyProperty.GetRelationalTypeMapping());
+        return true;
     }
 }
