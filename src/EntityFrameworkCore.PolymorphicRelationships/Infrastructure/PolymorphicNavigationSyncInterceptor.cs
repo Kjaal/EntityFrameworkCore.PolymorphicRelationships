@@ -282,6 +282,40 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
         IEnumerable<object> principals)
     {
         var pairs = new HashSet<(object PrincipalKey, object RelatedKey)>();
+        var principalIds = principals
+            .Select(principal => PolymorphicMemberAccessorCache.GetValue(dbContext, principal, relation.PrincipalKeyPropertyName))
+            .Where(value => value is not null)
+            .Select(value => NormalizeLookupKey(value!, relation.PrincipalKeyType))
+            .Distinct()
+            .ToArray();
+
+        if (principalIds.Length > 0)
+        {
+            foreach (var pivot in PolymorphicQueryExecutor.ListByPropertyValues(
+                         dbContext,
+                         relation.PivotType,
+                         relation.PivotIdPropertyName,
+                         relation.PivotIdPropertyType,
+                         principalIds))
+            {
+                var typeAlias = PolymorphicMemberAccessorCache.GetValue(dbContext, pivot, relation.PivotTypePropertyName) as string;
+                if (!string.Equals(typeAlias, relation.PrincipalAlias, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var principalId = PolymorphicMemberAccessorCache.GetValue(dbContext, pivot, relation.PivotIdPropertyName);
+                var relatedId = PolymorphicMemberAccessorCache.GetValue(dbContext, pivot, relation.PivotRelatedIdPropertyName);
+                if (principalId is null || relatedId is null)
+                {
+                    continue;
+                }
+
+                pairs.Add((
+                    NormalizeLookupKey(principalId, relation.PrincipalKeyType),
+                    NormalizeLookupKey(relatedId, relation.RelatedKeyType)));
+            }
+        }
 
         foreach (var pivot in dbContext.ChangeTracker.Entries()
                      .Where(entry => relation.PivotType.IsAssignableFrom(entry.Entity.GetType()) && entry.State != EntityState.Deleted)

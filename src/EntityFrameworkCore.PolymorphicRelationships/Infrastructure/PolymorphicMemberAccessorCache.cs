@@ -27,7 +27,7 @@ internal static class PolymorphicMemberAccessorCache
         var accessor = GetAccessor(target.GetType(), propertyName);
         if (accessor.Setter is null || accessor.PropertyType is null)
         {
-            return;
+            throw CreateMissingWritablePropertyException(target.GetType(), propertyName);
         }
 
         if (value is null)
@@ -51,7 +51,7 @@ internal static class PolymorphicMemberAccessorCache
         var accessor = GetAccessor(target.GetType(), propertyName);
         if (accessor.Getter is null || accessor.Setter is null || accessor.ElementType is null)
         {
-            return;
+            throw new InvalidOperationException($"Property '{target.GetType().Name}.{propertyName}' must be a writable collection navigation.");
         }
 
         var collection = accessor.Getter(target);
@@ -59,16 +59,21 @@ internal static class PolymorphicMemberAccessorCache
         {
             if (accessor.ListFactory is null)
             {
-                return;
+                throw new InvalidOperationException($"Property '{target.GetType().Name}.{propertyName}' could not be initialized as a collection.");
             }
 
             collection = accessor.ListFactory();
             accessor.Setter(target, collection);
         }
 
-        if (collection is IList list && !list.Contains(value))
+        if (accessor.CollectionContains is null || accessor.CollectionAdd is null)
         {
-            list.Add(value);
+            throw new InvalidOperationException($"Property '{target.GetType().Name}.{propertyName}' must implement ICollection<{accessor.ElementType.Name}>.");
+        }
+
+        if (!accessor.CollectionContains(collection, value))
+        {
+            accessor.CollectionAdd(collection, value);
         }
     }
 
@@ -92,7 +97,58 @@ internal static class PolymorphicMemberAccessorCache
             Setter = property.CanWrite ? CreateSetter(property) : null,
             ElementType = property.PropertyType.GenericTypeArguments.FirstOrDefault(),
             ListFactory = CreateListFactory(property.PropertyType),
+            CollectionAdd = CreateCollectionAdd(property.PropertyType),
+            CollectionContains = CreateCollectionContains(property.PropertyType),
         };
+    }
+
+    private static Func<object, object, bool>? CreateCollectionContains(Type propertyType)
+    {
+        var elementType = propertyType.GenericTypeArguments.FirstOrDefault();
+        if (elementType is null)
+        {
+            return null;
+        }
+
+        var collectionType = typeof(ICollection<>).MakeGenericType(elementType);
+        if (!collectionType.IsAssignableFrom(propertyType))
+        {
+            return null;
+        }
+
+        var target = Expression.Parameter(typeof(object), "target");
+        var value = Expression.Parameter(typeof(object), "value");
+        var castTarget = Expression.Convert(target, typeof(IEnumerable<>).MakeGenericType(elementType));
+        var castValue = Expression.Convert(value, elementType);
+        var contains = Expression.Call(typeof(Enumerable), nameof(Enumerable.Contains), new[] { elementType }, castTarget, castValue);
+        return Expression.Lambda<Func<object, object, bool>>(contains, target, value).Compile();
+    }
+
+    private static Action<object, object>? CreateCollectionAdd(Type propertyType)
+    {
+        var elementType = propertyType.GenericTypeArguments.FirstOrDefault();
+        if (elementType is null)
+        {
+            return null;
+        }
+
+        var collectionType = typeof(ICollection<>).MakeGenericType(elementType);
+        if (!collectionType.IsAssignableFrom(propertyType))
+        {
+            return null;
+        }
+
+        var target = Expression.Parameter(typeof(object), "target");
+        var value = Expression.Parameter(typeof(object), "value");
+        var castTarget = Expression.Convert(target, collectionType);
+        var castValue = Expression.Convert(value, elementType);
+        var add = Expression.Call(castTarget, collectionType.GetMethod(nameof(ICollection<object>.Add))!, castValue);
+        return Expression.Lambda<Action<object, object>>(add, target, value).Compile();
+    }
+
+    private static InvalidOperationException CreateMissingWritablePropertyException(Type targetType, string propertyName)
+    {
+        return new InvalidOperationException($"Property '{targetType.Name}.{propertyName}' was not found or is not writable.");
     }
 
     private static Func<object, object?> CreateGetter(PropertyInfo property)
@@ -142,5 +198,9 @@ internal static class PolymorphicMemberAccessorCache
         public Type? ElementType { get; init; }
 
         public Func<object>? ListFactory { get; init; }
+
+        public Action<object, object>? CollectionAdd { get; init; }
+
+        public Func<object, object, bool>? CollectionContains { get; init; }
     }
 }

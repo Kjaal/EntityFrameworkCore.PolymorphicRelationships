@@ -144,10 +144,18 @@ internal static class MorphIncludeLoader
         where TPrincipal : class
         where TDependent : class
     {
-        foreach (var principal in principals)
+        var queryTransform = request.Plan?.GetQueryTransform<TDependent>();
+        if (asNoTracking)
         {
-            await dbContext.LoadMorphOneAsync<TPrincipal, TDependent>(principal, request.PropertyName, cancellationToken);
+            queryTransform = ComposeNoTracking(queryTransform);
         }
+
+        await DbContextMorphExtensions.LoadMorphOneBatchAsync<TPrincipal, TDependent>(
+            dbContext,
+            principals,
+            request.PropertyName,
+            queryTransform,
+            cancellationToken);
     }
 
     private static Func<IQueryable<TEntity>, IQueryable<TEntity>> ComposeNoTracking<TEntity>(Func<IQueryable<TEntity>, IQueryable<TEntity>>? queryTransform)

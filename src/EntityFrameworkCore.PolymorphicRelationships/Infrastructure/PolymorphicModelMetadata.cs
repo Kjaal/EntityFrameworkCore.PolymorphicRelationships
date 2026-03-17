@@ -12,6 +12,10 @@ internal static class PolymorphicModelMetadata
     private static readonly JsonSerializerOptions JsonOptions = new();
     private static readonly ConditionalWeakTable<IReadOnlyModel, CachedState> Cache = new();
 
+    // EF model snapshots can only persist annotation-friendly values, so polymorphic relationship
+    // metadata is serialized into annotations for design-time round-tripping and then rehydrated
+    // into richer cached lookup structures for fast runtime access.
+
     public static List<MorphTypeMapping> GetOrCreateTypeMappings(IMutableModel model)
     {
         return GetCachedState(model).TypeMappings;

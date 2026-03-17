@@ -29,6 +29,13 @@ public sealed class PolymorphicModelBuilder
 
         var mappings = PolymorphicModelMetadata.GetOrCreateTypeMappings(_modelBuilder.Model);
         var existing = mappings.FirstOrDefault(mapping => mapping.ClrType == entityType);
+        var duplicateAlias = mappings.FirstOrDefault(mapping => mapping.ClrType != entityType
+            && string.Equals(mapping.Alias, alias, StringComparison.Ordinal));
+
+        if (duplicateAlias is not null)
+        {
+            throw new InvalidOperationException($"Morph alias '{alias}' is already registered for '{duplicateAlias.ClrType.Name}'. Morph aliases must be unique.");
+        }
 
         if (existing is null)
         {
