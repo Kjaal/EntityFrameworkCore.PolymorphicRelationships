@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations.Schema;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.Sqlite;
 
 namespace EntityFrameworkCore.PolymorphicRelationships.Tests;
 
@@ -391,6 +392,82 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task Native_orderby_supports_casted_polymorphic_owner_property_on_relational_provider()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var zPost = new Post { Id = 63, Title = "Zulu" };
+        var aPost = new Post { Id = 64, Title = "Alpha" };
+        var firstComment = new Comment { Id = 708, Body = "Zulu comment" };
+        var secondComment = new Comment { Id = 709, Body = "Alpha comment" };
+
+        dbContext.AddRange(zPost, aPost, firstComment, secondComment);
+        dbContext.SetMorphReference(firstComment, nameof(Comment.Commentable), zPost);
+        dbContext.SetMorphReference(secondComment, nameof(Comment.Commentable), aPost);
+        await dbContext.SaveChangesAsync();
+
+        var orderedBodies = await dbContext.Comments
+            .OrderBy(entity => ((Post)entity.Commentable!).Title)
+            .Select(entity => entity.Body)
+            .ToListAsync();
+
+        Assert.Equal(new[] { secondComment.Body, firstComment.Body }, orderedBodies);
+    }
+
+    [Fact]
+    public async Task Native_where_supports_polymorphic_collection_count_on_relational_provider()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var firstPost = new Post { Id = 67, Title = "First" };
+        var secondPost = new Post { Id = 68, Title = "Second" };
+        var firstComment = new Comment { Id = 712, Body = "One" };
+        var secondComment = new Comment { Id = 713, Body = "Two" };
+
+        dbContext.AddRange(firstPost, secondPost, firstComment, secondComment);
+        dbContext.SetMorphReference(firstComment, nameof(Comment.Commentable), firstPost);
+        dbContext.SetMorphReference(secondComment, nameof(Comment.Commentable), firstPost);
+        await dbContext.SaveChangesAsync();
+
+        var posts = await dbContext.Posts
+            .Where(entity => entity.Comments.Count > 0)
+            .ToListAsync();
+
+        Assert.Single(posts);
+        Assert.Equal(firstPost.Id, posts[0].Id);
+    }
+
+    [Fact]
+    public async Task Native_where_supports_polymorphic_collection_any_on_relational_provider()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var firstPost = new Post { Id = 69, Title = "First" };
+        var secondPost = new Post { Id = 70, Title = "Second" };
+        var comment = new Comment { Id = 714, Body = "One" };
+
+        dbContext.AddRange(firstPost, secondPost, comment);
+        dbContext.SetMorphReference(comment, nameof(Comment.Commentable), firstPost);
+        await dbContext.SaveChangesAsync();
+
+        var posts = await dbContext.Posts
+            .Where(entity => entity.Comments.Any())
+            .ToListAsync();
+
+        Assert.Single(posts);
+        Assert.Equal(firstPost.Id, posts[0].Id);
+    }
+
+    [Fact]
     public async Task Guid_primary_keys_work_for_morph_relationships()
     {
         await using var dbContext = CreateGuidContext();
@@ -593,6 +670,16 @@ public sealed class PolymorphicRelationshipTests
             .Options;
 
         return new GuidTestDbContext(options);
+    }
+
+    private static TestDbContext CreateSqliteContext(SqliteConnection connection)
+    {
+        var options = new DbContextOptionsBuilder<TestDbContext>()
+            .UseSqlite(connection)
+            .UsePolymorphicRelationships()
+            .Options;
+
+        return new TestDbContext(options);
     }
 
     private sealed class TestDbContext(DbContextOptions<TestDbContext> options) : DbContext(options)

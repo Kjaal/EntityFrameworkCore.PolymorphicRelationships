@@ -1,5 +1,6 @@
 using System.Linq.Expressions;
 using System.Reflection;
+using EntityFrameworkCore.PolymorphicRelationships.Infrastructure.Query;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 
@@ -168,6 +169,16 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
             return base.VisitMethodCall(node);
         }
 
+        protected override Expression VisitBinary(BinaryExpression node)
+        {
+            if (TryRewriteCollectionCountComparison(node, out var rewritten))
+            {
+                return rewritten;
+            }
+
+            return base.VisitBinary(node);
+        }
+
         private bool TryRewriteCollectionCount(MemberExpression node, out Expression rewritten)
         {
             rewritten = null!;
@@ -183,7 +194,7 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
                 return false;
             }
 
-            rewritten = BuildCollectionAggregateSubquery(collectionExpression.Expression!, collectionExpression.Member.Name, relationshipKind, useAny: false);
+            rewritten = BuildCollectionCountMarker(collectionExpression.Expression!, collectionExpression.Member.Name, relationshipKind);
             return true;
         }
 
@@ -204,8 +215,42 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
                 return false;
             }
 
-            rewritten = BuildCollectionAggregateSubquery(collectionExpression.Expression!, collectionExpression.Member.Name, relationshipKind, useAny: true);
+            rewritten = BuildCollectionAnyMarker(collectionExpression.Expression!, collectionExpression.Member.Name, relationshipKind);
             return true;
+        }
+
+        private bool TryRewriteCollectionCountComparison(BinaryExpression node, out Expression rewritten)
+        {
+            rewritten = null!;
+
+            if (!TryGetCollectionCount(node.Left, out var collectionExpression) || !TryGetConstantInt(node.Right, out var rightValue))
+            {
+                if (!TryGetCollectionCount(node.Right, out collectionExpression) || !TryGetConstantInt(node.Left, out rightValue))
+                {
+                    return false;
+                }
+
+                node = Expression.MakeBinary(Flip(node.NodeType), node.Right, node.Left);
+            }
+
+            if (!TryResolveCollectionRelationship(collectionExpression, out var relationshipKind))
+            {
+                return false;
+            }
+
+            var anyExpression = BuildCollectionAnyMarker(collectionExpression.Expression!, collectionExpression.Member.Name, relationshipKind);
+            rewritten = node.NodeType switch
+            {
+                ExpressionType.GreaterThan when rightValue == 0 => anyExpression,
+                ExpressionType.GreaterThanOrEqual when rightValue == 1 => anyExpression,
+                ExpressionType.NotEqual when rightValue == 0 => anyExpression,
+                ExpressionType.Equal when rightValue == 0 => Expression.Not(anyExpression),
+                ExpressionType.LessThanOrEqual when rightValue == 0 => Expression.Not(anyExpression),
+                ExpressionType.LessThan when rightValue == 1 => Expression.Not(anyExpression),
+                _ => null!,
+            };
+
+            return rewritten is not null;
         }
 
         private bool TryRewriteMorphOwnerProperty(MemberExpression node, out Expression rewritten)
@@ -233,47 +278,25 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
                 || targetOwnerType.IsAssignableFrom(candidate.PrincipalType))
                 ?? throw new InvalidOperationException($"No morph owner association for '{ownerNavigation.Member.Name}' matches type '{targetOwnerType.Name}'.");
 
-            var ownerSource = CreateQueryRootExpression(targetOwnerType);
-            var ownerParameter = Expression.Parameter(targetOwnerType, "owner");
+            var ownerId = BuildMappedPropertyAccess(ownerNavigation.Expression.Type, Visit(ownerNavigation.Expression), reference.IdPropertyName, reference.IdPropertyType);
+            var ownerType = BuildMappedPropertyAccess(ownerNavigation.Expression.Type, Visit(ownerNavigation.Expression), reference.TypePropertyName, typeof(string));
 
-            var ownerKey = BuildMappedPropertyAccess(targetOwnerType, ownerParameter, association.PrincipalKeyPropertyName, GetPropertyType(targetOwnerType, association.PrincipalKeyPropertyName));
-            var dependentId = BuildMappedPropertyAccess(ownerNavigation.Expression.Type, Visit(ownerNavigation.Expression), reference.IdPropertyName, reference.IdPropertyType);
-            if (ownerKey.Type != dependentId.Type)
-            {
-                dependentId = Expression.Convert(dependentId, ownerKey.Type);
-            }
-
-            var ownerPredicate = Expression.Lambda(
-                Expression.Equal(ownerKey, dependentId),
-                ownerParameter);
-
-            var filteredOwners = Expression.Call(
-                QueryableWhereMethod.MakeGenericMethod(targetOwnerType),
-                ownerSource,
-                Expression.Quote(ownerPredicate));
-
-            var selectedMember = Expression.MakeMemberAccess(ownerParameter, node.Member);
-            var selectLambda = Expression.Lambda(selectedMember, ownerParameter);
-            var selectCall = Expression.Call(
-                QueryableSelectMethod.MakeGenericMethod(targetOwnerType, node.Type),
-                filteredOwners,
-                Expression.Quote(selectLambda));
-
-            rewritten = Expression.Call(QueryableFirstOrDefaultMethod.MakeGenericMethod(node.Type), selectCall);
+            rewritten = Expression.Call(
+                typeof(PolymorphicSqlMarkerMethods),
+                nameof(PolymorphicSqlMarkerMethods.MorphOwnerProperty),
+                new[] { reference.IdPropertyType, node.Type },
+                ownerId,
+                ownerType,
+                Expression.Constant(ownerNavigation.Expression.Type.AssemblyQualifiedName!, typeof(string)),
+                Expression.Constant(ownerNavigation.Member.Name),
+                Expression.Constant(targetOwnerType.AssemblyQualifiedName!, typeof(string)),
+                Expression.Constant(node.Member.Name));
             return true;
         }
 
-        private Expression BuildCollectionAggregateSubquery(Expression ownerExpression, string relationshipName, PolymorphicRelationshipResolver.RelationshipKind relationshipKind, bool useAny)
+        private Expression BuildCollectionCountMarker(Expression ownerExpression, string relationshipName, PolymorphicRelationshipResolver.RelationshipKind relationshipKind)
         {
-            return relationshipKind.Kind switch
-            {
-                PolymorphicRelationshipResolver.RelationshipType.MorphMany => BuildMorphManyAggregate(ownerExpression, relationshipName, relationshipKind.RelatedType!, useAny),
-                _ => throw new InvalidOperationException($"Property '{ownerExpression.Type.Name}.{relationshipName}' is not a supported translated collection polymorphic relationship."),
-            };
-        }
-
-        private Expression BuildMorphManyAggregate(Expression ownerExpression, string relationshipName, Type dependentType, bool useAny)
-        {
+            var dependentType = relationshipKind.RelatedType!;
             var (reference, association) = PolymorphicModelMetadata.GetRequiredInverse(
                 dbContext.Model,
                 ownerExpression.Type,
@@ -281,45 +304,46 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
                 relationshipName,
                 MorphMultiplicity.Many);
 
-            var dependentSource = CreateQueryRootExpression(dependentType);
-            var dependentParameter = Expression.Parameter(dependentType, "dependent");
-
-            var aliasPredicate = Expression.Equal(
-                BuildMappedPropertyAccess(dependentType, dependentParameter, reference.TypePropertyName, typeof(string)),
-                Expression.Constant(association.Alias));
-
             var ownerKey = BuildMappedPropertyAccess(ownerExpression.Type, Visit(ownerExpression), association.PrincipalKeyPropertyName, GetPropertyType(ownerExpression.Type, association.PrincipalKeyPropertyName));
-            var dependentKey = BuildMappedPropertyAccess(dependentType, dependentParameter, reference.IdPropertyName, reference.IdPropertyType);
-            if (ownerKey.Type != dependentKey.Type)
+            if (ownerKey.Type != reference.IdPropertyType)
             {
-                ownerKey = Expression.Convert(ownerKey, dependentKey.Type);
+                ownerKey = Expression.Convert(ownerKey, reference.IdPropertyType);
             }
 
-            var predicate = Expression.Lambda(
-                Expression.AndAlso(aliasPredicate, Expression.Equal(dependentKey, ownerKey)),
-                dependentParameter);
-
-            var filtered = Expression.Call(
-                QueryableWhereMethod.MakeGenericMethod(dependentType),
-                dependentSource,
-                Expression.Quote(predicate));
-
-            return useAny
-                ? Expression.Call(QueryableAnyMethod.MakeGenericMethod(dependentType), filtered)
-                : Expression.Call(QueryableCountMethod.MakeGenericMethod(dependentType), filtered);
+            return Expression.Call(
+                typeof(PolymorphicSqlMarkerMethods),
+                nameof(PolymorphicSqlMarkerMethods.MorphCollectionCount),
+                new[] { reference.IdPropertyType },
+                ownerKey,
+                Expression.Constant(ownerExpression.Type.AssemblyQualifiedName!, typeof(string)),
+                Expression.Constant(dependentType.AssemblyQualifiedName!, typeof(string)),
+                Expression.Constant(relationshipName));
         }
 
-        private bool TryResolveCollectionRelationship(MemberExpression collectionExpression, out PolymorphicRelationshipResolver.RelationshipKind relationshipKind)
+        private Expression BuildCollectionAnyMarker(Expression ownerExpression, string relationshipName, PolymorphicRelationshipResolver.RelationshipKind relationshipKind)
         {
-            relationshipKind = default;
+            var dependentType = relationshipKind.RelatedType!;
+            var (reference, association) = PolymorphicModelMetadata.GetRequiredInverse(
+                dbContext.Model,
+                ownerExpression.Type,
+                dependentType,
+                relationshipName,
+                MorphMultiplicity.Many);
 
-            if (collectionExpression.Expression is null || !parameters.Contains(GetRootParameter(collectionExpression.Expression)))
+            var ownerKey = BuildMappedPropertyAccess(ownerExpression.Type, Visit(ownerExpression), association.PrincipalKeyPropertyName, GetPropertyType(ownerExpression.Type, association.PrincipalKeyPropertyName));
+            if (ownerKey.Type != reference.IdPropertyType)
             {
-                return false;
+                ownerKey = Expression.Convert(ownerKey, reference.IdPropertyType);
             }
 
-            relationshipKind = PolymorphicRelationshipResolver.Resolve(dbContext.Model, collectionExpression.Expression.Type, collectionExpression.Member.Name);
-            return relationshipKind.Kind == PolymorphicRelationshipResolver.RelationshipType.MorphMany;
+            return Expression.Call(
+                typeof(PolymorphicSqlMarkerMethods),
+                nameof(PolymorphicSqlMarkerMethods.MorphCollectionAny),
+                new[] { reference.IdPropertyType },
+                ownerKey,
+                Expression.Constant(ownerExpression.Type.AssemblyQualifiedName!, typeof(string)),
+                Expression.Constant(dependentType.AssemblyQualifiedName!, typeof(string)),
+                Expression.Constant(relationshipName));
         }
 
         private static bool TryGetOwnerNavigation(Expression? expression, out MemberExpression ownerNavigation, out Type targetOwnerType)
@@ -344,14 +368,59 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
             return false;
         }
 
-        private Expression CreateQueryRootExpression(Type entityType)
+        private bool TryResolveCollectionRelationship(MemberExpression collectionExpression, out PolymorphicRelationshipResolver.RelationshipKind relationshipKind)
         {
-            var set = typeof(DbContext)
-                .GetMethod(nameof(DbContext.Set), Type.EmptyTypes)!
-                .MakeGenericMethod(entityType)
-                .Invoke(dbContext, null)!;
+            relationshipKind = default;
 
-            return ((IQueryable)set).Expression;
+            if (collectionExpression.Expression is null || !parameters.Contains(GetRootParameter(collectionExpression.Expression)))
+            {
+                return false;
+            }
+
+            relationshipKind = PolymorphicRelationshipResolver.Resolve(dbContext.Model, collectionExpression.Expression.Type, collectionExpression.Member.Name);
+            return relationshipKind.Kind == PolymorphicRelationshipResolver.RelationshipType.MorphMany;
+        }
+
+        private static bool TryGetCollectionCount(Expression expression, out MemberExpression collectionExpression)
+        {
+            collectionExpression = null!;
+            if (expression is MemberExpression { Member.Name: nameof(ICollection<object>.Count), Expression: MemberExpression collection })
+            {
+                collectionExpression = collection;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryGetConstantInt(Expression expression, out int value)
+        {
+            if (expression is ConstantExpression constantExpression && constantExpression.Value is int intValue)
+            {
+                value = intValue;
+                return true;
+            }
+
+            if (expression is UnaryExpression { NodeType: ExpressionType.Convert, Operand: ConstantExpression convertedConstant } && convertedConstant.Value is int convertedInt)
+            {
+                value = convertedInt;
+                return true;
+            }
+
+            value = default;
+            return false;
+        }
+
+        private static ExpressionType Flip(ExpressionType expressionType)
+        {
+            return expressionType switch
+            {
+                ExpressionType.GreaterThan => ExpressionType.LessThan,
+                ExpressionType.GreaterThanOrEqual => ExpressionType.LessThanOrEqual,
+                ExpressionType.LessThan => ExpressionType.GreaterThan,
+                ExpressionType.LessThanOrEqual => ExpressionType.GreaterThanOrEqual,
+                _ => expressionType,
+            };
         }
 
         private static Expression BuildMappedPropertyAccess(Type declaringType, Expression instance, string propertyName, Type propertyType)
