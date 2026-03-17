@@ -6,11 +6,10 @@ internal static class PolymorphicProjectionAccessor
 {
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, Dictionary<string, object?>> LoadedValues = new();
 
-    public static TProperty? GetNavigation<TSource, TProperty>(TSource source, DbContext dbContext, string propertyName)
+    public static TProperty? GetNavigation<TSource, TProperty>(TSource source, Guid contextId, string propertyName)
         where TSource : class
     {
         ArgumentNullException.ThrowIfNull(source);
-        ArgumentNullException.ThrowIfNull(dbContext);
         ArgumentException.ThrowIfNullOrWhiteSpace(propertyName);
 
         var cache = LoadedValues.GetValue(source, static _ => new Dictionary<string, object?>(StringComparer.Ordinal));
@@ -19,6 +18,7 @@ internal static class PolymorphicProjectionAccessor
             return (TProperty?)cached;
         }
 
+        using var dbContext = PolymorphicDbContextRegistry.CreateCompanionContext(contextId);
         var relationship = PolymorphicRelationshipResolver.Resolve(dbContext.Model, source.GetType(), propertyName);
         var value = relationship.Kind switch
         {

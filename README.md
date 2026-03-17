@@ -134,6 +134,30 @@ var commentWithOwnerPlan = await dbContext.Comments
 
 `IncludeMorph(...)` supports query-shaping methods such as `Where(...)`, `OrderBy(...)`, `OrderByDescending(...)`, `Skip(...)`, `Take(...)`, `AsNoTracking()`, `ToListAsync()`, `ToArrayAsync()`, `FirstAsync()`, `FirstOrDefaultAsync()`, `SingleAsync()`, `SingleOrDefaultAsync()`, and `SelectAsync(...)`.
 
+### Project polymorphic relationships with native `Select(...)`
+
+```csharp
+var projectedPost = await dbContext.Posts
+    .Where(entity => entity.Id == Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
+    .Select(entity => new PostDto
+    {
+        Title = entity.Title,
+        Comments = entity.Comments,
+    })
+    .SingleAsync();
+
+var projectedComment = await dbContext.Comments
+    .Where(entity => entity.Id == Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"))
+    .Select(entity => new CommentDto
+    {
+        Body = entity.Body,
+        Commentable = entity.Commentable,
+    })
+    .SingleAsync();
+```
+
+Native `Select(...)` projection support works for polymorphic navigations without introducing a separate projection API. Projection-time polymorphic navigation loading is resolved after the root query is materialized, which keeps the syntax native while avoiding breaking changes to standard EF Core query behavior.
+
 ### Advanced loading helpers
 
 ```csharp

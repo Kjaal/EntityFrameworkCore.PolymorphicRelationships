@@ -13,10 +13,11 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
             return queryExpression;
         }
 
-        return new PolymorphicSelectProjectionVisitor(eventData.Context).Visit(queryExpression);
+        var contextId = PolymorphicDbContextRegistry.Register(eventData.Context);
+        return new PolymorphicSelectProjectionVisitor(contextId, eventData.Context).Visit(queryExpression);
     }
 
-    private sealed class PolymorphicSelectProjectionVisitor(DbContext dbContext) : ExpressionVisitor
+    private sealed class PolymorphicSelectProjectionVisitor(Guid contextId, DbContext dbContext) : ExpressionVisitor
     {
         protected override Expression VisitMethodCall(MethodCallExpression node)
         {
@@ -27,7 +28,7 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
                 var source = Visit(node.Arguments[0]);
                 var lambda = (LambdaExpression)StripQuote(node.Arguments[1]);
                 var rewrittenLambda = Expression.Lambda(
-                    new ProjectionMemberRewriter(dbContext, lambda.Parameters).Visit(lambda.Body)!,
+                    new ProjectionMemberRewriter(contextId, dbContext, lambda.Parameters).Visit(lambda.Body)!,
                     lambda.Parameters);
 
                 return Expression.Call(node.Method, source, Expression.Quote(rewrittenLambda));
@@ -47,7 +48,7 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
         }
     }
 
-    private sealed class ProjectionMemberRewriter(DbContext dbContext, IReadOnlyCollection<ParameterExpression> parameters) : ExpressionVisitor
+    private sealed class ProjectionMemberRewriter(Guid contextId, DbContext dbContext, IReadOnlyCollection<ParameterExpression> parameters) : ExpressionVisitor
     {
         protected override Expression VisitMember(MemberExpression node)
         {
@@ -74,7 +75,7 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
                 nameof(PolymorphicProjectionAccessor.GetNavigation),
                 new[] { node.Expression.Type, node.Type },
                 sourceExpression,
-                Expression.Constant(dbContext),
+                Expression.Constant(contextId),
                 Expression.Constant(propertyName));
         }
 
