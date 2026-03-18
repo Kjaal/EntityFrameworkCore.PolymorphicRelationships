@@ -1,6 +1,6 @@
 # EntityFrameworkCore.PolymorphicRelationships
 
-`EntityFrameworkCore.PolymorphicRelationships` adds Laravel-style polymorphic relationships to Entity Framework Core without requiring database-enforced foreign keys.
+`EntityFrameworkCore.PolymorphicRelationships` adds Laravel-style polymorphic relationships to Entity Framework Core 8 without requiring database-enforced foreign keys.
 
 ## Overview
 
@@ -10,11 +10,18 @@
 - Laravel-style naming conventions for morph columns and pivot columns
 - attribute-based relationship discovery
 - navigation-first save behavior plus include-style polymorphic loading helpers
+- temporary/store-generated key repair for new morph owners and new pivot rows
+- save-time uniqueness enforcement for `morphOne` and polymorphic pivot pairs
+- safe removal sync for relationships that were explicitly loaded through package APIs
 - code-driven cascade delete for registered morph relationships
 - save-time integrity validation for morph keys and pivot references
 - migration/scaffolding support for designer helpers and attribute conventions
 
 ## Installation
+
+Current package target:
+
+- EF Core 8 / `.NET 8`
 
 ```bash
 dotnet add package EntityFrameworkCore.PolymorphicRelationships
@@ -84,6 +91,8 @@ await dbContext.SaveChangesAsync();
 
 The package synchronizes the morph type and morph id during `SaveChanges` and `SaveChangesAsync`, so adding dependents through configured inverse navigations works like a regular EF-style relationship.
 
+Store-generated keys are also supported for newly added owners and newly added many-to-many pairs. If an owner or related entity receives its key from the database, the package repairs the final morph values after the insert completes.
+
 Direct dependent-side navigation assignment is also supported:
 
 ```csharp
@@ -98,6 +107,8 @@ Polymorphic many-to-many relationships can also be synchronized from collection 
 post.Tags.Add(tag);
 await dbContext.SaveChangesAsync();
 ```
+
+If you remove entities from a relationship that was previously loaded through `IncludeMorph(...)` or one of the package load helpers, the package now treats that as an intentional tracked removal and clears the morph link or deletes the matching pivot row during `SaveChanges`.
 
 ### Load polymorphic relationships with include-style syntax
 
@@ -136,6 +147,15 @@ var commentWithOwnerPlan = await dbContext.Comments
 
 ### Project polymorphic relationships with native `Select(...)`
 
+Experimental native `Select(...)` projection support must be enabled explicitly:
+
+```csharp
+var options = new DbContextOptionsBuilder<AppDbContext>()
+    .UseSqlServer(connectionString)
+    .UsePolymorphicRelationships(options => options.EnableExperimentalSelectProjectionSupport())
+    .Options;
+```
+
 ```csharp
 var projectedPost = await dbContext.Posts
     .Where(entity => entity.Id == Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
@@ -156,7 +176,7 @@ var projectedComment = await dbContext.Comments
     .SingleAsync();
 ```
 
-Native `Select(...)` projection support works for polymorphic navigations without introducing a separate projection API. Projection-time polymorphic navigation loading is resolved after the root query is materialized, which keeps the syntax native while avoiding breaking changes to standard EF Core query behavior.
+Native `Select(...)` projection support currently remains experimental. It works for polymorphic navigations without introducing a separate projection API, but projection-time polymorphic navigation loading is resolved after the root query is materialized and uses a companion `DbContext`. For production workloads, prefer `IncludeMorph(...)` or the lower-level load helpers unless you explicitly accept these tradeoffs.
 
 ### Native translated query support
 
@@ -189,13 +209,13 @@ The package currently supports native translated query shapes for:
 - `morphMany.Count` comparisons such as `> 0`, `> 1`, `== 0`, and `!= 0`
 - owner-property ordering for `morphTo` when the owner type is explicitly cast in the query
 
-Provider support for translated query shapes is prioritized in this order:
+Provider support for translated query shapes is currently exercised in CI and tests in this order:
 
 1. PostgreSQL
 2. SQLite
 3. SQL Server
 
-PostgreSQL is the primary relational target for translated polymorphic query behavior. SQLite is used for fast relational coverage in tests, and SQL Server currently has smoke/query-generation coverage.
+PostgreSQL is the primary relational target for translated polymorphic query behavior. SQLite is used for fast relational coverage in tests, and SQL Server currently has smoke/query-generation coverage. Other providers should be treated as unsupported until they have dedicated execution coverage.
 
 Native translated query support is intentionally narrower than native `Select(...)` projection support. Unsupported shapes should continue to use `IncludeMorph(...)` or the lower-level helper APIs.
 
@@ -292,8 +312,12 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 - mixed-owner batch loading with per-type plans
 - code-executed cascade delete interception
 - save-time morph integrity validation
+- repair of temporary/store-generated morph keys after insert
+- uniqueness enforcement for `morphOne` and polymorphic many-to-many pivot pairs
+- tracked removal sync for loaded morph collections and loaded `morphOne` navigations
 - migration snapshot and scaffolding compatibility for supported helpers
 - translated relational query support for selected native `Where(...)` / `OrderBy(...)` polymorphic shapes
+- EF Core 8 / `.NET 8` target with SQLite, PostgreSQL, and SQL Server coverage, plus CI lanes for Windows and PostgreSQL
 
 ## Current limitations
 
@@ -303,6 +327,8 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 - one-of-many selection is limited to a single ordering expression
 - translated native query support currently focuses on selected `morphMany` aggregate filters and owner-property ordering rather than the full space of polymorphic query expressions
 - native translated owner-property access currently expects an explicit owner cast in the query expression
+- native `Select(...)` polymorphic projection support is experimental and requires explicit opt-in
+- automatic removal sync only applies to relationships that were loaded through package APIs in the current `DbContext`
 - Laravel features such as `morphToMany` custom pivot behavior and broader relationship macros are not yet fully mirrored
 
 ## Roadmap

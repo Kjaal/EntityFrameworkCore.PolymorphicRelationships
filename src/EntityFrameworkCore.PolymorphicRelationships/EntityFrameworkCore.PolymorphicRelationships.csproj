@@ -7,8 +7,8 @@
     <AssemblyName>EntityFrameworkCore.PolymorphicRelationships</AssemblyName>
     <RootNamespace>EntityFrameworkCore.PolymorphicRelationships</RootNamespace>
     <PackageId>EntityFrameworkCore.PolymorphicRelationships</PackageId>
-    <Title>Entity Framework Core Polymorphic Relationships</Title>
-    <Description>Laravel-style polymorphic relationships for Entity Framework Core without database-enforced foreign keys.</Description>
+    <Title>Entity Framework Core 8 Polymorphic Relationships</Title>
+    <Description>Laravel-style polymorphic relationships for Entity Framework Core 8 without database-enforced foreign keys.</Description>
     <Version>0.1.0-alpha</Version>
     <Authors>EntityFrameworkCore.PolymorphicRelationships</Authors>
     <PackageTags>ef-core;entity-framework-core;polymorphic;laravel;eloquent;relationships</PackageTags>

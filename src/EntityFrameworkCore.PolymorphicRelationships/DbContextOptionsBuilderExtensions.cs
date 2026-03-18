@@ -11,10 +11,18 @@ public static class DbContextOptionsBuilderExtensions
 
     public static DbContextOptionsBuilder UsePolymorphicRelationships(this DbContextOptionsBuilder optionsBuilder)
     {
+        return optionsBuilder.UsePolymorphicRelationships(configure: null);
+    }
+
+    public static DbContextOptionsBuilder UsePolymorphicRelationships(this DbContextOptionsBuilder optionsBuilder, Action<PolymorphicOptionsBuilder>? configure)
+    {
         ArgumentNullException.ThrowIfNull(optionsBuilder);
 
+        var polymorphicOptionsBuilder = new PolymorphicOptionsBuilder();
+        configure?.Invoke(polymorphicOptionsBuilder);
+
         var infrastructure = (IDbContextOptionsBuilderInfrastructure)optionsBuilder;
-        infrastructure.AddOrUpdateExtension(new PolymorphicRelationalOptionsExtension());
+        infrastructure.AddOrUpdateExtension(new PolymorphicRelationalOptionsExtension(polymorphicOptionsBuilder.ExperimentalSelectProjectionSupportEnabled));
         optionsBuilder.AddInterceptors(QueryExpressionInterceptor);
         optionsBuilder.AddInterceptors(new PolymorphicNavigationSyncInterceptor());
         optionsBuilder.AddInterceptors(new PolymorphicCascadeDeleteInterceptor());
@@ -26,6 +34,13 @@ public static class DbContextOptionsBuilderExtensions
         where TContext : DbContext
     {
         UsePolymorphicRelationships((DbContextOptionsBuilder)optionsBuilder);
+        return optionsBuilder;
+    }
+
+    public static DbContextOptionsBuilder<TContext> UsePolymorphicRelationships<TContext>(this DbContextOptionsBuilder<TContext> optionsBuilder, Action<PolymorphicOptionsBuilder>? configure)
+        where TContext : DbContext
+    {
+        UsePolymorphicRelationships((DbContextOptionsBuilder)optionsBuilder, configure);
         return optionsBuilder;
     }
 

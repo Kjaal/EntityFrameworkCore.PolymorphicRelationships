@@ -3,6 +3,7 @@ using System.Reflection;
 using EntityFrameworkCore.PolymorphicRelationships.Infrastructure.Query;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 
 namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
@@ -26,7 +27,10 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
         }
 
         var contextId = PolymorphicDbContextRegistry.Register(eventData.Context);
-        return new PolymorphicQueryRewriter(contextId, eventData.Context).Visit(queryExpression);
+        var options = eventData.Context.GetService<Microsoft.EntityFrameworkCore.Infrastructure.IDbContextOptions>();
+        var extension = options.FindExtension<Query.PolymorphicRelationalOptionsExtension>();
+        var enableExperimentalProjectionSupport = extension?.ExperimentalSelectProjectionSupportEnabled == true;
+        return new PolymorphicQueryRewriter(contextId, eventData.Context, enableExperimentalProjectionSupport).Visit(queryExpression);
     }
 
     private static MethodInfo GetQueryableMethod(string methodName, int parameterCount, int genericArgumentCount, params int[] lambdaArgumentCounts)
@@ -57,13 +61,13 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
         return actualCounts.SequenceEqual(lambdaArgumentCounts);
     }
 
-    private sealed class PolymorphicQueryRewriter(Guid contextId, DbContext dbContext) : ExpressionVisitor
+    private sealed class PolymorphicQueryRewriter(Guid contextId, DbContext dbContext, bool enableExperimentalProjectionSupport) : ExpressionVisitor
     {
         protected override Expression VisitMethodCall(MethodCallExpression node)
         {
             if (node.Method.DeclaringType == typeof(Queryable)
                 && node.Arguments.Count == 2
-                && IsSupportedQueryableMethod(node.Method.Name))
+                && IsSupportedQueryableMethod(node.Method.Name, enableExperimentalProjectionSupport))
             {
                 var source = Visit(node.Arguments[0]);
                 var lambda = (LambdaExpression)StripQuote(node.Arguments[1]);
@@ -79,9 +83,9 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
             return base.VisitMethodCall(node);
         }
 
-        private static bool IsSupportedQueryableMethod(string methodName)
+        private static bool IsSupportedQueryableMethod(string methodName, bool enableExperimentalProjectionSupport)
         {
-            return methodName == nameof(Queryable.Select)
+            return (enableExperimentalProjectionSupport && methodName == nameof(Queryable.Select))
                 || methodName == nameof(Queryable.Where)
                 || methodName == nameof(Queryable.OrderBy)
                 || methodName == nameof(Queryable.OrderByDescending)

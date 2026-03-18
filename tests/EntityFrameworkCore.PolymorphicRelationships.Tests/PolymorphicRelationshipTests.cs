@@ -81,6 +81,53 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task SetMorphReference_repairs_temporary_store_generated_owner_keys()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var post = new Post { Title = "Generated owner" };
+        var comment = new Comment { Body = "Generated child" };
+
+        dbContext.AddRange(post, comment);
+        dbContext.SetMorphReference(comment, nameof(Comment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        Assert.True(post.Id > 0);
+        Assert.True(comment.Id > 0);
+        Assert.Equal("posts", comment.CommentableType);
+        Assert.Equal(post.Id, comment.CommentableId);
+
+        var storedComment = await dbContext.Comments.AsNoTracking().SingleAsync(entity => entity.Id == comment.Id);
+        Assert.Equal(post.Id, storedComment.CommentableId);
+    }
+
+    [Fact]
+    public async Task SavingChanges_repairs_temporary_store_generated_owner_keys_from_collection_navigation()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var post = new Post { Title = "Generated owner" };
+        post.Comments.Add(new Comment { Body = "Generated child" });
+
+        dbContext.Add(post);
+        await dbContext.SaveChangesAsync();
+
+        var comment = Assert.Single(post.Comments);
+        Assert.True(post.Id > 0);
+        Assert.True(comment.Id > 0);
+        Assert.Equal(post.Id, comment.CommentableId);
+
+        var storedComment = await dbContext.Comments.AsNoTracking().SingleAsync(entity => entity.Id == comment.Id);
+        Assert.Equal(post.Id, storedComment.CommentableId);
+    }
+
+    [Fact]
     public async Task SavingChanges_clears_morph_columns_when_navigation_is_cleared()
     {
         await using var dbContext = CreateContext();
@@ -95,6 +142,51 @@ public sealed class PolymorphicRelationshipTests
 
         Assert.Null(comment.CommentableType);
         Assert.Null(comment.CommentableId);
+    }
+
+    [Fact]
+    public async Task Removing_loaded_morph_many_item_clears_only_that_relationship()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 7, Title = "Owner" };
+        var firstComment = new Comment { Id = 106, Body = "First" };
+        var secondComment = new Comment { Id = 107, Body = "Second" };
+
+        dbContext.AddRange(post, firstComment, secondComment);
+        dbContext.SetMorphReference(firstComment, nameof(Comment.Commentable), post);
+        dbContext.SetMorphReference(secondComment, nameof(Comment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        await dbContext.LoadMorphManyAsync<Post, Comment>(post, nameof(Post.Comments), query => query.Where(entity => entity.Id == firstComment.Id));
+        post.Comments.Clear();
+
+        await dbContext.SaveChangesAsync();
+
+        var reloadedFirst = await dbContext.Comments.SingleAsync(entity => entity.Id == firstComment.Id);
+        var reloadedSecond = await dbContext.Comments.SingleAsync(entity => entity.Id == secondComment.Id);
+        Assert.Null(reloadedFirst.CommentableType);
+        Assert.Null(reloadedFirst.CommentableId);
+        Assert.Equal("posts", reloadedSecond.CommentableType);
+        Assert.Equal(post.Id, reloadedSecond.CommentableId);
+    }
+
+    [Fact]
+    public async Task Clearing_loaded_morph_one_navigation_clears_the_dependent_relationship()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 8, Title = "Owner" };
+        var image = new Image { Id = 24, Url = "/cover.png" };
+
+        dbContext.AddRange(post, image);
+        dbContext.SetMorphReference(image, nameof(Image.Imageable), post);
+        await dbContext.SaveChangesAsync();
+
+        await dbContext.LoadMorphOneAsync<Post, Image>(post, nameof(Post.Image));
+        post.Image = null;
+        await dbContext.SaveChangesAsync();
+
+        Assert.Null(image.ImageableType);
+        Assert.Null(image.ImageableId);
     }
 
     [Fact]
@@ -169,6 +261,121 @@ public sealed class PolymorphicRelationshipTests
         Assert.Equal("posts", pivot.TaggableType);
         Assert.Equal(post.Id, pivot.TaggableId);
         Assert.Equal(tag.Id, pivot.TagId);
+    }
+
+    [Fact]
+    public async Task AttachMorphToMany_repairs_temporary_store_generated_keys_for_pivot_rows()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var post = new Post { Title = "Generated post" };
+        var tag = new Tag { Name = "Generated tag" };
+
+        dbContext.AddRange(post, tag);
+        dbContext.AttachMorphToMany<Post, Tag, TagAssignment>(post, nameof(Post.Tags), tag);
+        await dbContext.SaveChangesAsync();
+
+        var pivot = await dbContext.TagAssignments.AsNoTracking().SingleAsync();
+
+        Assert.True(post.Id > 0);
+        Assert.True(tag.Id > 0);
+        Assert.Equal("posts", pivot.TaggableType);
+        Assert.Equal(post.Id, pivot.TaggableId);
+        Assert.Equal(tag.Id, pivot.TagId);
+    }
+
+    [Fact]
+    public async Task SaveChanges_rejects_duplicate_morph_one_dependents_for_same_owner()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 17, Title = "Post" };
+        var firstImage = new Image { Id = 31, Url = "/first.png" };
+        var secondImage = new Image { Id = 32, Url = "/second.png" };
+
+        dbContext.AddRange(post, firstImage, secondImage);
+        dbContext.SetMorphReference(firstImage, nameof(Image.Imageable), post);
+        dbContext.SetMorphReference(secondImage, nameof(Image.Imageable), post);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => dbContext.SaveChangesAsync());
+        Assert.Contains("allows only one dependent", exception.Message);
+    }
+
+    [Fact]
+    public async Task AttachMorphToMany_ignores_duplicate_pairs()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 18, Title = "Post" };
+        var tag = new Tag { Id = 304, Name = "tag" };
+
+        dbContext.AddRange(post, tag);
+        dbContext.AttachMorphToMany<Post, Tag, TagAssignment>(post, nameof(Post.Tags), tag);
+        dbContext.AttachMorphToMany<Post, Tag, TagAssignment>(post, nameof(Post.Tags), tag);
+        await dbContext.SaveChangesAsync();
+
+        Assert.Single(await dbContext.TagAssignments.ToListAsync());
+        Assert.Single(post.Tags);
+        Assert.Single(tag.Posts);
+    }
+
+    [Fact]
+    public async Task SaveChanges_rejects_duplicate_morph_pivot_pairs()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 19, Title = "Post" };
+        var tag = new Tag { Id = 305, Name = "tag" };
+        var firstPivot = new TagAssignment { Id = 41, TaggableType = "posts", TaggableId = post.Id, TagId = tag.Id };
+        var secondPivot = new TagAssignment { Id = 42, TaggableType = "posts", TaggableId = post.Id, TagId = tag.Id };
+
+        dbContext.AddRange(post, tag, firstPivot, secondPivot);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => dbContext.SaveChangesAsync());
+        Assert.Contains("allows only one pivot row", exception.Message);
+    }
+
+    [Fact]
+    public async Task DetachMorphToManyAsync_updates_in_memory_collections()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 20, Title = "Post" };
+        var tag = new Tag { Id = 306, Name = "tag" };
+
+        dbContext.AddRange(post, tag);
+        dbContext.AttachMorphToMany<Post, Tag, TagAssignment>(post, nameof(Post.Tags), tag);
+        await dbContext.SaveChangesAsync();
+
+        var removed = await dbContext.DetachMorphToManyAsync(post, nameof(Post.Tags), tag);
+
+        Assert.Equal(1, removed);
+        Assert.Empty(post.Tags);
+        Assert.Empty(tag.Posts);
+
+        await dbContext.SaveChangesAsync();
+        Assert.Empty(await dbContext.TagAssignments.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Removing_loaded_morph_to_many_item_deletes_only_that_pivot_row()
+    {
+        await using var dbContext = CreateContext();
+        var post = new Post { Id = 23, Title = "Post" };
+        var firstTag = new Tag { Id = 307, Name = "first" };
+        var secondTag = new Tag { Id = 308, Name = "second" };
+
+        dbContext.AddRange(post, firstTag, secondTag);
+        dbContext.AttachMorphToMany<Post, Tag, TagAssignment>(post, nameof(Post.Tags), firstTag);
+        dbContext.AttachMorphToMany<Post, Tag, TagAssignment>(post, nameof(Post.Tags), secondTag);
+        await dbContext.SaveChangesAsync();
+
+        await dbContext.LoadMorphToManyAsync<Post, Tag>(post, nameof(Post.Tags), query => query.Where(entity => entity.Id == firstTag.Id));
+        post.Tags.Clear();
+        await dbContext.SaveChangesAsync();
+
+        var pivots = await dbContext.TagAssignments.OrderBy(entity => entity.TagId).ToListAsync();
+        Assert.Single(pivots);
+        Assert.Equal(secondTag.Id, pivots[0].TagId);
     }
 
     [Fact]
@@ -333,7 +540,7 @@ public sealed class PolymorphicRelationshipTests
     [Fact]
     public async Task Native_select_projects_polymorphic_collection_like_include_results()
     {
-        await using var dbContext = CreateContext();
+        await using var dbContext = CreateContext(enableExperimentalProjectionSupport: true);
         var post = new Post { Id = 61, Title = "Post" };
         var firstComment = new Comment { Id = 705, Body = "First" };
         var secondComment = new Comment { Id = 706, Body = "Second" };
@@ -364,7 +571,7 @@ public sealed class PolymorphicRelationshipTests
     [Fact]
     public async Task Native_select_projects_polymorphic_owner_like_include_results()
     {
-        await using var dbContext = CreateContext();
+        await using var dbContext = CreateContext(enableExperimentalProjectionSupport: true);
         var post = new Post { Id = 62, Title = "Post" };
         var comment = new Comment { Id = 707, Body = "Owner" };
 
@@ -530,6 +737,32 @@ public sealed class PolymorphicRelationshipTests
 
         Assert.Single(posts);
         Assert.Equal(firstPost.Id, posts[0].Id);
+    }
+
+    [Fact]
+    public async Task Native_select_projection_requires_experimental_opt_in()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var post = new Post { Id = 79, Title = "Post" };
+        var comment = new Comment { Id = 720, Body = "Comment" };
+        dbContext.AddRange(post, comment);
+        dbContext.SetMorphReference(comment, nameof(Comment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        var projected = await dbContext.Posts
+            .Where(entity => entity.Id == post.Id)
+            .Select(entity => new PostProjection
+            {
+                Title = entity.Title,
+                Comments = entity.Comments,
+            })
+            .SingleAsync();
+
+        Assert.Empty(projected.Comments);
     }
 
     [Fact]
@@ -717,14 +950,21 @@ public sealed class PolymorphicRelationshipTests
         Assert.Equal(tag.Id, tags[0].Id);
     }
 
-    private static TestDbContext CreateContext(string? databaseName = null)
+    private static TestDbContext CreateContext(string? databaseName = null, bool enableExperimentalProjectionSupport = false)
     {
-        var options = new DbContextOptionsBuilder<TestDbContext>()
-            .UseInMemoryDatabase(databaseName ?? Guid.NewGuid().ToString("N"))
-            .UsePolymorphicRelationships()
-            .Options;
+        var optionsBuilder = new DbContextOptionsBuilder<TestDbContext>()
+            .UseInMemoryDatabase(databaseName ?? Guid.NewGuid().ToString("N"));
 
-        return new TestDbContext(options);
+        if (enableExperimentalProjectionSupport)
+        {
+            optionsBuilder.UsePolymorphicRelationships(options => options.EnableExperimentalSelectProjectionSupport());
+        }
+        else
+        {
+            optionsBuilder.UsePolymorphicRelationships();
+        }
+
+        return new TestDbContext(optionsBuilder.Options);
     }
 
     private static GuidTestDbContext CreateGuidContext(string? databaseName = null)
@@ -737,14 +977,21 @@ public sealed class PolymorphicRelationshipTests
         return new GuidTestDbContext(options);
     }
 
-    private static TestDbContext CreateSqliteContext(SqliteConnection connection)
+    private static TestDbContext CreateSqliteContext(SqliteConnection connection, bool enableExperimentalProjectionSupport = false)
     {
-        var options = new DbContextOptionsBuilder<TestDbContext>()
-            .UseSqlite(connection)
-            .UsePolymorphicRelationships()
-            .Options;
+        var optionsBuilder = new DbContextOptionsBuilder<TestDbContext>()
+            .UseSqlite(connection);
 
-        return new TestDbContext(options);
+        if (enableExperimentalProjectionSupport)
+        {
+            optionsBuilder.UsePolymorphicRelationships(options => options.EnableExperimentalSelectProjectionSupport());
+        }
+        else
+        {
+            optionsBuilder.UsePolymorphicRelationships();
+        }
+
+        return new TestDbContext(optionsBuilder.Options);
     }
 
     private sealed class TestDbContext(DbContextOptions<TestDbContext> options) : DbContext(options)

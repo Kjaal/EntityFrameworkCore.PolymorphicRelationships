@@ -37,11 +37,374 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
         return base.SavingChangesAsync(eventData, result, cancellationToken);
     }
 
+    public override int SavedChanges(SaveChangesCompletedEventData eventData, int result)
+    {
+        if (eventData.Context is not null)
+        {
+            result += RepairTemporaryKeyAssignments(eventData.Context);
+        }
+
+        return base.SavedChanges(eventData, result);
+    }
+
+    public override async ValueTask<int> SavedChangesAsync(
+        SaveChangesCompletedEventData eventData,
+        int result,
+        CancellationToken cancellationToken = default)
+    {
+        if (eventData.Context is not null)
+        {
+            result += await RepairTemporaryKeyAssignmentsAsync(eventData.Context, cancellationToken);
+        }
+
+        return await base.SavedChangesAsync(eventData, result, cancellationToken);
+    }
+
+    public override void SaveChangesFailed(DbContextErrorEventData eventData)
+    {
+        if (eventData.Context is not null)
+        {
+            PolymorphicPendingKeyRepairRegistry.Reset(eventData.Context);
+        }
+
+        base.SaveChangesFailed(eventData);
+    }
+
+    public override async Task SaveChangesFailedAsync(DbContextErrorEventData eventData, CancellationToken cancellationToken = default)
+    {
+        if (eventData.Context is not null)
+        {
+            PolymorphicPendingKeyRepairRegistry.Reset(eventData.Context);
+        }
+
+        await base.SaveChangesFailedAsync(eventData, cancellationToken);
+    }
+
     private static void SyncNavigations(DbContext dbContext)
     {
         SyncMorphToAssignments(dbContext);
+        SyncLoadedNavigationRemovals(dbContext);
         SyncInverseMorphNavigations(dbContext);
         SyncMorphToManyNavigations(dbContext);
+        PolymorphicLoadedNavigationRegistry.CommitCurrentValues(dbContext);
+    }
+
+    private static void SyncLoadedNavigationRemovals(DbContext dbContext)
+    {
+        foreach (var snapshot in PolymorphicLoadedNavigationRegistry.GetSnapshots(dbContext))
+        {
+            if (dbContext.Entry(snapshot.Entity).State is EntityState.Detached or EntityState.Deleted)
+            {
+                continue;
+            }
+
+            var relationship = PolymorphicRelationshipResolver.Resolve(dbContext.Model, snapshot.Entity.GetType(), snapshot.PropertyName);
+            switch (relationship.Kind)
+            {
+                case PolymorphicRelationshipResolver.RelationshipType.MorphMany:
+                    SyncMorphManyRemovals(dbContext, snapshot);
+                    break;
+                case PolymorphicRelationshipResolver.RelationshipType.MorphOne:
+                    SyncMorphOneRemovals(dbContext, snapshot);
+                    break;
+                case PolymorphicRelationshipResolver.RelationshipType.MorphToMany:
+                    SyncMorphToManyRemovals(dbContext, snapshot);
+                    break;
+                case PolymorphicRelationshipResolver.RelationshipType.MorphedByMany:
+                    SyncMorphedByManyRemovals(dbContext, snapshot);
+                    break;
+            }
+        }
+    }
+
+    private static void SyncMorphManyRemovals(DbContext dbContext, PolymorphicLoadedNavigationRegistry.LoadedNavigationSnapshot snapshot)
+    {
+        var currentValues = GetCurrentValues(dbContext, snapshot.Entity, snapshot.PropertyName, isCollection: true);
+        var currentIdentities = currentValues.Select(value => BuildEntityIdentity(dbContext, value)).ToHashSet(StringComparer.Ordinal);
+        foreach (var removedDependent in snapshot.Values.Where(value => !currentIdentities.Contains(BuildEntityIdentity(dbContext, value))))
+        {
+            ClearInverseMorphReference(dbContext, snapshot.Entity, removedDependent, snapshot.PropertyName, MorphMultiplicity.Many);
+        }
+    }
+
+    private static void SyncMorphOneRemovals(DbContext dbContext, PolymorphicLoadedNavigationRegistry.LoadedNavigationSnapshot snapshot)
+    {
+        var currentValues = GetCurrentValues(dbContext, snapshot.Entity, snapshot.PropertyName, isCollection: false);
+        var currentIdentities = currentValues.Select(value => BuildEntityIdentity(dbContext, value)).ToHashSet(StringComparer.Ordinal);
+        foreach (var removedDependent in snapshot.Values.Where(value => !currentIdentities.Contains(BuildEntityIdentity(dbContext, value))))
+        {
+            ClearInverseMorphReference(dbContext, snapshot.Entity, removedDependent, snapshot.PropertyName, MorphMultiplicity.One);
+        }
+    }
+
+    private static void SyncMorphToManyRemovals(DbContext dbContext, PolymorphicLoadedNavigationRegistry.LoadedNavigationSnapshot snapshot)
+    {
+        var currentValues = GetCurrentValues(dbContext, snapshot.Entity, snapshot.PropertyName, isCollection: true);
+        var currentIdentities = currentValues.Select(value => BuildEntityIdentity(dbContext, value)).ToHashSet(StringComparer.Ordinal);
+        foreach (var removedRelated in snapshot.Values.Where(value => !currentIdentities.Contains(BuildEntityIdentity(dbContext, value))))
+        {
+            RemoveMorphToManyPair(dbContext, snapshot.Entity, removedRelated, snapshot.PropertyName, inverseSide: false);
+        }
+    }
+
+    private static void SyncMorphedByManyRemovals(DbContext dbContext, PolymorphicLoadedNavigationRegistry.LoadedNavigationSnapshot snapshot)
+    {
+        var currentValues = GetCurrentValues(dbContext, snapshot.Entity, snapshot.PropertyName, isCollection: true);
+        var currentIdentities = currentValues.Select(value => BuildEntityIdentity(dbContext, value)).ToHashSet(StringComparer.Ordinal);
+        foreach (var removedPrincipal in snapshot.Values.Where(value => !currentIdentities.Contains(BuildEntityIdentity(dbContext, value))))
+        {
+            RemoveMorphToManyPair(dbContext, snapshot.Entity, removedPrincipal, snapshot.PropertyName, inverseSide: true);
+        }
+    }
+
+    private static void ClearInverseMorphReference(
+        DbContext dbContext,
+        object principal,
+        object dependent,
+        string inverseRelationshipName,
+        MorphMultiplicity multiplicity)
+    {
+        var dependentEntry = dbContext.Entry(dependent);
+        if (dependentEntry.State is EntityState.Detached or EntityState.Deleted)
+        {
+            return;
+        }
+
+        var (reference, association) = PolymorphicModelMetadata.GetRequiredInverse(
+            dbContext.Model,
+            principal.GetType(),
+            dependent.GetType(),
+            inverseRelationshipName,
+            multiplicity);
+
+        var principalEntry = dbContext.Entry(principal);
+        var ownerId = principalEntry.Property(association.PrincipalKeyPropertyName).CurrentValue
+            ?? principalEntry.Property(association.PrincipalKeyPropertyName).OriginalValue;
+        var currentAlias = dependentEntry.Property(reference.TypePropertyName).CurrentValue as string;
+        var currentOwnerId = dependentEntry.Property(reference.IdPropertyName).CurrentValue
+            ?? dependentEntry.Property(reference.IdPropertyName).OriginalValue;
+
+        if (ownerId is null || currentOwnerId is null)
+        {
+            return;
+        }
+
+        if (!string.Equals(currentAlias, association.Alias, StringComparison.Ordinal)
+            || !Equals(NormalizeLookupKey(currentOwnerId, reference.IdPropertyType), NormalizeLookupKey(ownerId, reference.IdPropertyType)))
+        {
+            return;
+        }
+
+        dependentEntry.Property(reference.TypePropertyName).CurrentValue = null;
+        dependentEntry.Property(reference.IdPropertyName).CurrentValue = null;
+        PolymorphicMemberAccessorCache.SetValue(dependent, reference.RelationshipName, null);
+    }
+
+    private static void RemoveMorphToManyPair(DbContext dbContext, object anchorEntity, object otherEntity, string propertyName, bool inverseSide)
+    {
+        if (inverseSide)
+        {
+            var relation = PolymorphicModelMetadata.GetRequiredMorphedByMany(dbContext.Model, anchorEntity.GetType(), otherEntity.GetType(), propertyName);
+            RemovePivotRows(dbContext, relation, otherEntity, anchorEntity);
+            PolymorphicMemberAccessorCache.RemoveCollectionValue(otherEntity, relation.RelationshipName, anchorEntity);
+            return;
+        }
+
+        var directRelation = PolymorphicModelMetadata.GetRequiredManyToMany(dbContext.Model, anchorEntity.GetType(), otherEntity.GetType(), propertyName);
+        RemovePivotRows(dbContext, directRelation, anchorEntity, otherEntity);
+        PolymorphicMemberAccessorCache.RemoveCollectionValue(otherEntity, directRelation.InverseRelationshipName, anchorEntity);
+    }
+
+    private static void RemovePivotRows(
+        DbContext dbContext,
+        PolymorphicModelMetadata.MorphManyToManyRelation relation,
+        object principal,
+        object related)
+    {
+        var principalEntry = dbContext.Entry(principal);
+        var relatedEntry = dbContext.Entry(related);
+        if (principalEntry.State is EntityState.Detached or EntityState.Deleted
+            || relatedEntry.State is EntityState.Detached or EntityState.Deleted)
+        {
+            return;
+        }
+
+        var principalId = principalEntry.Property(relation.PrincipalKeyPropertyName).CurrentValue
+            ?? principalEntry.Property(relation.PrincipalKeyPropertyName).OriginalValue;
+        var relatedId = relatedEntry.Property(relation.RelatedKeyPropertyName).CurrentValue
+            ?? relatedEntry.Property(relation.RelatedKeyPropertyName).OriginalValue;
+        if (principalId is null || relatedId is null)
+        {
+            return;
+        }
+
+        var pivots = PolymorphicQueryExecutor.ListByTwoProperties(
+            dbContext,
+            relation.PivotType,
+            relation.PivotTypePropertyName,
+            typeof(string),
+            relation.PrincipalAlias,
+            relation.PivotRelatedIdPropertyName,
+            relation.PivotRelatedIdPropertyType,
+            relatedId);
+
+        foreach (var pivot in pivots)
+        {
+            var pivotEntry = dbContext.Entry(pivot);
+            if (pivotEntry.State == EntityState.Deleted)
+            {
+                continue;
+            }
+
+            var pivotPrincipalId = pivotEntry.Property(relation.PivotIdPropertyName).CurrentValue
+                ?? pivotEntry.Property(relation.PivotIdPropertyName).OriginalValue;
+            if (pivotPrincipalId is null)
+            {
+                continue;
+            }
+
+            if (Equals(NormalizeLookupKey(pivotPrincipalId, relation.PrincipalKeyType), NormalizeLookupKey(principalId, relation.PrincipalKeyType)))
+            {
+                pivotEntry.State = EntityState.Deleted;
+            }
+        }
+    }
+
+    private static IReadOnlyList<object> GetCurrentValues(DbContext dbContext, object entity, string propertyName, bool isCollection)
+    {
+        var currentValue = PolymorphicMemberAccessorCache.GetValue(dbContext, entity, propertyName);
+        if (isCollection)
+        {
+            if (currentValue is not System.Collections.IEnumerable enumerable || currentValue is string)
+            {
+                return [];
+            }
+
+            return enumerable.Cast<object?>().Where(value => value is not null).Cast<object>().ToList();
+        }
+
+        return currentValue is null ? [] : [currentValue];
+    }
+
+    private static string BuildEntityIdentity(DbContext dbContext, object entity)
+    {
+        var entry = dbContext.Entry(entity);
+        var primaryKey = entry.Metadata.FindPrimaryKey();
+        if (primaryKey is null || primaryKey.Properties.Count != 1)
+        {
+            return $"ref:{System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(entity)}";
+        }
+
+        var keyProperty = primaryKey.Properties[0];
+        var keyValue = entry.Property(keyProperty.Name).CurrentValue ?? entry.Property(keyProperty.Name).OriginalValue;
+        return keyValue is null
+            ? $"ref:{System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(entity)}"
+            : Convert.ToString(PolymorphicValueConverter.ConvertForAssignment(keyValue, keyProperty.ClrType), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+    }
+
+    private static int RepairTemporaryKeyAssignments(DbContext dbContext)
+    {
+        if (!PolymorphicPendingKeyRepairRegistry.TryBeginRepair(dbContext))
+        {
+            return 0;
+        }
+
+        try
+        {
+            var pendingRepairs = PolymorphicPendingKeyRepairRegistry.Drain(dbContext);
+            ApplyPendingRepairs(dbContext, pendingRepairs);
+            return dbContext.ChangeTracker.HasChanges() ? dbContext.SaveChanges() : 0;
+        }
+        finally
+        {
+            PolymorphicPendingKeyRepairRegistry.EndRepair(dbContext);
+        }
+    }
+
+    private static async Task<int> RepairTemporaryKeyAssignmentsAsync(DbContext dbContext, CancellationToken cancellationToken)
+    {
+        if (!PolymorphicPendingKeyRepairRegistry.TryBeginRepair(dbContext))
+        {
+            return 0;
+        }
+
+        try
+        {
+            var pendingRepairs = PolymorphicPendingKeyRepairRegistry.Drain(dbContext);
+            ApplyPendingRepairs(dbContext, pendingRepairs);
+            return dbContext.ChangeTracker.HasChanges()
+                ? await dbContext.SaveChangesAsync(cancellationToken)
+                : 0;
+        }
+        finally
+        {
+            PolymorphicPendingKeyRepairRegistry.EndRepair(dbContext);
+        }
+    }
+
+    private static void ApplyPendingRepairs(DbContext dbContext, PolymorphicPendingKeyRepairRegistry.PendingRepairBatch pendingRepairs)
+    {
+        foreach (var repair in pendingRepairs.MorphReferenceRepairs)
+        {
+            ApplyMorphReferenceRepair(dbContext, repair);
+        }
+
+        foreach (var repair in pendingRepairs.MorphToManyRepairs)
+        {
+            ApplyMorphToManyRepair(dbContext, repair);
+        }
+    }
+
+    private static void ApplyMorphReferenceRepair(DbContext dbContext, PolymorphicPendingKeyRepairRegistry.PendingMorphReferenceRepair repair)
+    {
+        var dependentEntry = dbContext.Entry(repair.Dependent);
+        var principalEntry = dbContext.Entry(repair.Principal);
+        if (dependentEntry.State == EntityState.Detached || dependentEntry.State == EntityState.Deleted
+            || principalEntry.State == EntityState.Detached || principalEntry.State == EntityState.Deleted)
+        {
+            return;
+        }
+
+        var reference = PolymorphicModelMetadata.GetRequiredReference(dbContext.Model, repair.Dependent.GetType(), repair.RelationshipName);
+        var association = reference.Associations.FirstOrDefault(candidate => candidate.PrincipalType.IsAssignableFrom(repair.Principal.GetType()))
+            ?? throw new InvalidOperationException($"Relationship '{repair.RelationshipName}' on '{repair.Dependent.GetType().Name}' does not allow principals of type '{repair.Principal.GetType().Name}'.");
+
+        var principalKeyEntry = principalEntry.Property(association.PrincipalKeyPropertyName);
+        var keyValue = principalKeyEntry.CurrentValue ?? principalKeyEntry.OriginalValue;
+        if (keyValue is null || principalKeyEntry.IsTemporary)
+        {
+            return;
+        }
+
+        dependentEntry.Property(reference.TypePropertyName).CurrentValue = association.Alias;
+        dependentEntry.Property(reference.IdPropertyName).CurrentValue = PolymorphicValueConverter.ConvertForAssignment(keyValue, reference.IdPropertyType);
+    }
+
+    private static void ApplyMorphToManyRepair(DbContext dbContext, PolymorphicPendingKeyRepairRegistry.PendingMorphToManyRepair repair)
+    {
+        var pivotEntry = dbContext.Entry(repair.Pivot);
+        var principalEntry = dbContext.Entry(repair.Principal);
+        var relatedEntry = dbContext.Entry(repair.Related);
+        if (pivotEntry.State == EntityState.Detached || pivotEntry.State == EntityState.Deleted
+            || principalEntry.State == EntityState.Detached || principalEntry.State == EntityState.Deleted
+            || relatedEntry.State == EntityState.Detached || relatedEntry.State == EntityState.Deleted)
+        {
+            return;
+        }
+
+        var relation = PolymorphicModelMetadata.GetRequiredManyToMany(dbContext.Model, repair.Principal.GetType(), repair.Related.GetType(), repair.RelationshipName);
+        var principalKeyEntry = principalEntry.Property(relation.PrincipalKeyPropertyName);
+        var relatedKeyEntry = relatedEntry.Property(relation.RelatedKeyPropertyName);
+        var principalId = principalKeyEntry.CurrentValue ?? principalKeyEntry.OriginalValue;
+        var relatedId = relatedKeyEntry.CurrentValue ?? relatedKeyEntry.OriginalValue;
+        if (principalId is null || relatedId is null || principalKeyEntry.IsTemporary || relatedKeyEntry.IsTemporary)
+        {
+            return;
+        }
+
+        pivotEntry.Property(relation.PivotTypePropertyName).CurrentValue = relation.PrincipalAlias;
+        pivotEntry.Property(relation.PivotIdPropertyName).CurrentValue = PolymorphicValueConverter.ConvertForAssignment(principalId, relation.PivotIdPropertyType);
+        pivotEntry.Property(relation.PivotRelatedIdPropertyName).CurrentValue = PolymorphicValueConverter.ConvertForAssignment(relatedId, relation.PivotRelatedIdPropertyType);
     }
 
     private static void SyncMorphToAssignments(DbContext dbContext)

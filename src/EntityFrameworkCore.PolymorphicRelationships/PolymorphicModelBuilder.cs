@@ -98,6 +98,12 @@ public sealed class PolymorphicModelBuilder
             && string.Equals(candidate.RelationshipName, relationshipName, StringComparison.Ordinal))
             ?? throw new InvalidOperationException($"The morphTo relationship '{dependentType.Name}.{relationshipName}' must be registered before inverse attribute conventions can be applied.");
 
+        var conflictingMultiplicity = reference.Associations.FirstOrDefault(candidate => candidate.Multiplicity != multiplicity);
+        if (conflictingMultiplicity is not null)
+        {
+            throw new InvalidOperationException($"Morph relationship '{dependentType.Name}.{relationshipName}' cannot mix morphOne and morphMany registrations across principals.");
+        }
+
         var resolvedOwnerKey = string.IsNullOrWhiteSpace(ownerKeyPropertyName)
             ? ExpressionHelpers.GetSingleKeyPropertyName(principalEntityType)
             : ownerKeyPropertyName;
@@ -119,6 +125,10 @@ public sealed class PolymorphicModelBuilder
             alias,
             multiplicity,
             deleteBehavior));
+
+        _modelBuilder.Entity(dependentType)
+            .HasIndex(reference.TypePropertyName, reference.IdPropertyName)
+            .IsUnique(multiplicity == MorphMultiplicity.One);
 
         PolymorphicModelMetadata.SyncReferences(_modelBuilder.Model, references);
     }
@@ -328,6 +338,7 @@ public sealed class PolymorphicModelBuilder
         pivotBuilder.Property(pivotRelatedIdPropertyType, relatedIdPropertyName);
         pivotBuilder.HasIndex(typePropertyName, idPropertyName);
         pivotBuilder.HasIndex(relatedIdPropertyName);
+        pivotBuilder.HasIndex(typePropertyName, idPropertyName, relatedIdPropertyName).IsUnique();
 
         var principalKeyClrType = principalEntityType.FindProperty(principalKeyPropertyName)?.ClrType
             ?? throw new InvalidOperationException($"Property '{principalKeyPropertyName}' was not found on '{principalType.Name}'.");

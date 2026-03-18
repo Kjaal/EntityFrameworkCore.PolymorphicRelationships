@@ -36,8 +36,9 @@ public static class DbContextMorphExtensions
             ?? throw new InvalidOperationException($"Relationship '{relationshipName}' on '{typeof(TDependent).Name}' does not allow principals of type '{principal.GetType().Name}'.");
 
         var principalEntry = dbContext.Entry(principal);
-        var keyValue = principalEntry.Property(association.PrincipalKeyPropertyName).CurrentValue
-            ?? principalEntry.Property(association.PrincipalKeyPropertyName).OriginalValue;
+        var principalKeyEntry = principalEntry.Property(association.PrincipalKeyPropertyName);
+        var keyValue = principalKeyEntry.CurrentValue
+            ?? principalKeyEntry.OriginalValue;
 
         if (keyValue is null)
         {
@@ -47,6 +48,11 @@ public static class DbContextMorphExtensions
         dependentEntry.Property(reference.TypePropertyName).CurrentValue = association.Alias;
         dependentEntry.Property(reference.IdPropertyName).CurrentValue = PolymorphicValueConverter.ConvertForAssignment(keyValue, reference.IdPropertyType);
         AssignProperty(dependent, relationshipName, principal);
+
+        if (principalKeyEntry.IsTemporary)
+        {
+            PolymorphicPendingKeyRepairRegistry.TrackMorphReference(dbContext, dependent, relationshipName, principal);
+        }
     }
 
     public static async Task<object?> LoadMorphAsync<TDependent>(
@@ -361,6 +367,7 @@ public static class DbContextMorphExtensions
 
         var typedDependents = await query.ToListAsync(cancellationToken);
         AssignProperty(principal, inverseRelationshipName, typedDependents);
+        RecordLoadedCollectionSnapshot(dbContext, principal, inverseRelationshipName, typedDependents);
         return typedDependents;
     }
 
@@ -466,6 +473,7 @@ public static class DbContextMorphExtensions
                         : Array.Empty<TDependent>();
 
                 AssignProperty(item.Entity, inverseRelationshipName, value);
+                RecordLoadedCollectionSnapshot(dbContext, item.Entity, inverseRelationshipName, value.Cast<object>());
                 results[item.Entity] = value;
             }
         }
@@ -554,6 +562,7 @@ public static class DbContextMorphExtensions
                         : Array.Empty<TDependent>();
 
                 AssignProperty(item.Entity, inverseRelationshipName, value);
+                RecordLoadedCollectionSnapshot(dbContext, item.Entity, inverseRelationshipName, value.Cast<object>());
                 results[item.Entity] = value;
             }
         }
@@ -640,6 +649,10 @@ public static class DbContextMorphExtensions
         var selected = await query.FirstOrDefaultAsync(cancellationToken);
 
         AssignProperty(principal!, assignToPropertyName ?? inverseRelationshipName, selected);
+        if (string.Equals(assignToPropertyName ?? inverseRelationshipName, inverseRelationshipName, StringComparison.Ordinal))
+        {
+            RecordLoadedReferenceSnapshot(dbContext, principal, inverseRelationshipName, selected);
+        }
         return selected;
     }
 
@@ -740,6 +753,10 @@ public static class DbContextMorphExtensions
                 }
 
                 AssignProperty(item.Entity, assignToPropertyName ?? inverseRelationshipName, selected);
+                if (string.Equals(assignToPropertyName ?? inverseRelationshipName, inverseRelationshipName, StringComparison.Ordinal))
+                {
+                    RecordLoadedReferenceSnapshot(dbContext, item.Entity, inverseRelationshipName, selected);
+                }
                 results[item.Entity] = selected;
             }
         }
@@ -762,8 +779,29 @@ public static class DbContextMorphExtensions
         ArgumentNullException.ThrowIfNull(related);
 
         var relation = PolymorphicModelMetadata.GetRequiredManyToMany(dbContext.Model, principal.GetType(), related.GetType(), relationshipName);
-        var principalId = GetEntityKeyValue(dbContext, principal, relation.PrincipalKeyPropertyName);
-        var relatedId = GetEntityKeyValue(dbContext, related, relation.RelatedKeyPropertyName);
+        var principalEntry = dbContext.Entry(principal);
+        var relatedEntry = dbContext.Entry(related);
+        var principalKeyEntry = principalEntry.Property(relation.PrincipalKeyPropertyName);
+        var relatedKeyEntry = relatedEntry.Property(relation.RelatedKeyPropertyName);
+        var principalId = principalKeyEntry.CurrentValue
+            ?? principalKeyEntry.OriginalValue
+            ?? throw new InvalidOperationException($"The key property '{relation.PrincipalKeyPropertyName}' on '{principal.GetType().Name}' is null.");
+        var relatedId = relatedKeyEntry.CurrentValue
+            ?? relatedKeyEntry.OriginalValue
+            ?? throw new InvalidOperationException($"The key property '{relation.RelatedKeyPropertyName}' on '{related.GetType().Name}' is null.");
+
+        if (TryGetTrackedMorphToManyPivot(dbContext, relation, principalId, relatedId, out var existingPivot))
+        {
+            AddCollectionValue(principal, relationshipName, related);
+            AddCollectionValue(related, relation.InverseRelationshipName, principal);
+
+            if (principalKeyEntry.IsTemporary || relatedKeyEntry.IsTemporary)
+            {
+                PolymorphicPendingKeyRepairRegistry.TrackMorphToMany(dbContext, existingPivot, principal, related, relationshipName);
+            }
+
+            return (TPivot)existingPivot;
+        }
 
         var pivot = pivotFactory is null
             ? (TPivot?)Activator.CreateInstance(typeof(TPivot))
@@ -781,6 +819,12 @@ public static class DbContextMorphExtensions
 
         AddCollectionValue(principal, relationshipName, related);
         AddCollectionValue(related, relation.InverseRelationshipName, principal);
+
+        if (principalKeyEntry.IsTemporary || relatedKeyEntry.IsTemporary)
+        {
+            PolymorphicPendingKeyRepairRegistry.TrackMorphToMany(dbContext, pivot, principal, related, relationshipName);
+        }
+
         return pivot;
     }
 
@@ -821,6 +865,12 @@ public static class DbContextMorphExtensions
         foreach (var pivot in matches)
         {
             dbContext.Remove(pivot);
+        }
+
+        if (matches.Count > 0)
+        {
+            RemoveCollectionValue(principal, relationshipName, related);
+            RemoveCollectionValue(related, relation.InverseRelationshipName, principal);
         }
 
         return matches.Count;
@@ -867,6 +917,7 @@ public static class DbContextMorphExtensions
         {
             var empty = Array.Empty<TRelated>();
             AssignProperty(principal, relationshipName, empty);
+            RecordLoadedCollectionSnapshot(dbContext, principal, relationshipName, empty.Cast<object>());
             return empty;
         }
 
@@ -892,6 +943,7 @@ public static class DbContextMorphExtensions
         {
             var empty = Array.Empty<TRelated>();
             AssignProperty(principal, relationshipName, empty);
+            RecordLoadedCollectionSnapshot(dbContext, principal, relationshipName, empty.Cast<object>());
             return empty;
         }
 
@@ -900,6 +952,7 @@ public static class DbContextMorphExtensions
 
         var typedRelatedEntities = await query.ToListAsync(cancellationToken);
         AssignProperty(principal, relationshipName, typedRelatedEntities);
+        RecordLoadedCollectionSnapshot(dbContext, principal, relationshipName, typedRelatedEntities);
         return typedRelatedEntities;
     }
 
@@ -1036,6 +1089,7 @@ public static class DbContextMorphExtensions
                 }
 
                 AssignProperty(item.Entity, relationshipName, relatedValues);
+                RecordLoadedCollectionSnapshot(dbContext, item.Entity, relationshipName, relatedValues.Cast<object>());
                 results[item.Entity] = relatedValues;
             }
         }
@@ -1084,6 +1138,7 @@ public static class DbContextMorphExtensions
         {
             var empty = Array.Empty<TPrincipal>();
             AssignProperty(related, inverseRelationshipName, empty);
+            RecordLoadedCollectionSnapshot(dbContext, related, inverseRelationshipName, empty.Cast<object>());
             return empty;
         }
 
@@ -1109,6 +1164,7 @@ public static class DbContextMorphExtensions
         {
             var empty = Array.Empty<TPrincipal>();
             AssignProperty(related, inverseRelationshipName, empty);
+            RecordLoadedCollectionSnapshot(dbContext, related, inverseRelationshipName, empty.Cast<object>());
             return empty;
         }
 
@@ -1116,6 +1172,7 @@ public static class DbContextMorphExtensions
         query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds);
         var typedPrincipals = await query.ToListAsync(cancellationToken);
         AssignProperty(related, inverseRelationshipName, typedPrincipals);
+        RecordLoadedCollectionSnapshot(dbContext, related, inverseRelationshipName, typedPrincipals);
         return typedPrincipals;
     }
 
@@ -1252,6 +1309,7 @@ public static class DbContextMorphExtensions
                 }
 
                 AssignProperty(item.Entity, inverseRelationshipName, owners);
+                RecordLoadedCollectionSnapshot(dbContext, item.Entity, inverseRelationshipName, owners.Cast<object>());
                 results[item.Entity] = owners;
             }
         }
@@ -1384,6 +1442,7 @@ public static class DbContextMorphExtensions
                 }
 
                 AssignProperty(item.Entity, inverseRelationshipName, dependent);
+                RecordLoadedReferenceSnapshot(dbContext, item.Entity, inverseRelationshipName, dependent);
                 results[item.Entity] = dependent;
             }
         }
@@ -1448,6 +1507,47 @@ public static class DbContextMorphExtensions
             ?? throw new InvalidOperationException($"A lookup key value for '{keyType.Name}' was null.");
     }
 
+    private static bool TryGetTrackedMorphToManyPivot(
+        DbContext dbContext,
+        PolymorphicModelMetadata.MorphManyToManyRelation relation,
+        object principalId,
+        object relatedId,
+        out object pivot)
+    {
+        var normalizedPrincipalId = NormalizeLookupKey(principalId, relation.PivotIdPropertyType);
+        var normalizedRelatedId = NormalizeLookupKey(relatedId, relation.PivotRelatedIdPropertyType);
+
+        foreach (var entry in dbContext.ChangeTracker.Entries())
+        {
+            if (!relation.PivotType.IsAssignableFrom(entry.Entity.GetType()) || entry.State == EntityState.Deleted)
+            {
+                continue;
+            }
+
+            if (!string.Equals(entry.Property(relation.PivotTypePropertyName).CurrentValue as string, relation.PrincipalAlias, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var existingPrincipalId = entry.Property(relation.PivotIdPropertyName).CurrentValue ?? entry.Property(relation.PivotIdPropertyName).OriginalValue;
+            var existingRelatedId = entry.Property(relation.PivotRelatedIdPropertyName).CurrentValue ?? entry.Property(relation.PivotRelatedIdPropertyName).OriginalValue;
+            if (existingPrincipalId is null || existingRelatedId is null)
+            {
+                continue;
+            }
+
+            if (Equals(NormalizeLookupKey(existingPrincipalId, relation.PivotIdPropertyType), normalizedPrincipalId)
+                && Equals(NormalizeLookupKey(existingRelatedId, relation.PivotRelatedIdPropertyType), normalizedRelatedId))
+            {
+                pivot = entry.Entity;
+                return true;
+            }
+        }
+
+        pivot = null!;
+        return false;
+    }
+
     private static void AssignProperty(object target, string propertyName, object? value)
     {
         PolymorphicMemberAccessorCache.SetValue(target, propertyName, value);
@@ -1456,6 +1556,21 @@ public static class DbContextMorphExtensions
     private static void AddCollectionValue(object target, string propertyName, object value)
     {
         PolymorphicMemberAccessorCache.AddCollectionValue(target, propertyName, value);
+    }
+
+    private static void RemoveCollectionValue(object target, string propertyName, object value)
+    {
+        PolymorphicMemberAccessorCache.RemoveCollectionValue(target, propertyName, value);
+    }
+
+    private static void RecordLoadedReferenceSnapshot(DbContext dbContext, object entity, string propertyName, object? value)
+    {
+        PolymorphicLoadedNavigationRegistry.RecordReference(dbContext, entity, propertyName, value);
+    }
+
+    private static void RecordLoadedCollectionSnapshot(DbContext dbContext, object entity, string propertyName, IEnumerable<object> values)
+    {
+        PolymorphicLoadedNavigationRegistry.RecordCollection(dbContext, entity, propertyName, values);
     }
 
     private sealed record MorphDependentState<TDependent>(TDependent Dependent, object OwnerId)

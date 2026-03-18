@@ -91,6 +91,18 @@ public sealed class PolymorphicIntegrityValidationInterceptor : SaveChangesInter
                     $"Morph relationship '{reference.DependentType.Name}.{reference.RelationshipName}'",
                     queryAsync,
                     cancellationToken);
+
+                if (association.Multiplicity == MorphMultiplicity.One)
+                {
+                    await EnsureMorphOneUnique(
+                        dbContext,
+                        reference,
+                        association,
+                        aliasGroup.ToArray(),
+                        keyPropertyType,
+                        queryAsync,
+                        cancellationToken);
+                }
             }
         }
     }
@@ -188,6 +200,111 @@ public sealed class PolymorphicIntegrityValidationInterceptor : SaveChangesInter
                         queryAsync,
                         cancellationToken);
                 }
+
+                await EnsurePivotUnique(dbContext, groupedRelation, relationEntries, queryAsync, cancellationToken);
+            }
+        }
+    }
+
+    private static async Task EnsureMorphOneUnique(
+        DbContext dbContext,
+        PolymorphicModelMetadata.MorphReference reference,
+        PolymorphicModelMetadata.MorphAssociation association,
+        IReadOnlyList<EntityEntry> entries,
+        Type keyPropertyType,
+        bool queryAsync,
+        CancellationToken cancellationToken)
+    {
+        foreach (var ownerGroup in entries.GroupBy(
+                     entry => CreateLookupKey(entry.Property(reference.IdPropertyName).CurrentValue!, keyPropertyType),
+                     StringComparer.Ordinal))
+        {
+            if (ownerGroup.Count() > 1)
+            {
+                throw new InvalidOperationException($"Morph relationship '{reference.DependentType.Name}.{reference.RelationshipName}' allows only one dependent for owner '{association.Alias}:{ownerGroup.Key}'.");
+            }
+
+            var trackedEntry = ownerGroup.Single();
+            var ownerId = PolymorphicValueConverter.ConvertForAssignment(trackedEntry.Property(reference.IdPropertyName).CurrentValue, keyPropertyType)!;
+            var trackedPrimaryKey = GetEntryPrimaryKey(trackedEntry);
+            var matches = queryAsync
+                ? await PolymorphicQueryExecutor.ListByTwoPropertiesAsync(
+                    dbContext,
+                    reference.DependentType,
+                    reference.TypePropertyName,
+                    typeof(string),
+                    association.Alias,
+                    reference.IdPropertyName,
+                    keyPropertyType,
+                    ownerId,
+                    cancellationToken)
+                : PolymorphicQueryExecutor.ListByTwoProperties(
+                    dbContext,
+                    reference.DependentType,
+                    reference.TypePropertyName,
+                    typeof(string),
+                    association.Alias,
+                    reference.IdPropertyName,
+                    keyPropertyType,
+                    ownerId);
+
+            var hasDuplicate = matches.Any(match => !string.Equals(GetEntityPrimaryKey(dbContext, match), trackedPrimaryKey, StringComparison.Ordinal));
+            if (hasDuplicate)
+            {
+                throw new InvalidOperationException($"Morph relationship '{reference.DependentType.Name}.{reference.RelationshipName}' allows only one dependent for owner '{association.Alias}:{ownerGroup.Key}'.");
+            }
+        }
+    }
+
+    private static async Task EnsurePivotUnique(
+        DbContext dbContext,
+        PolymorphicModelMetadata.MorphManyToManyRelation relation,
+        IReadOnlyList<EntityEntry> entries,
+        bool queryAsync,
+        CancellationToken cancellationToken)
+    {
+        foreach (var pairGroup in entries.GroupBy(
+                     entry => (
+                         Principal: CreateLookupKey(entry.Property(relation.PivotIdPropertyName).CurrentValue!, relation.PrincipalKeyType),
+                         Related: CreateLookupKey(entry.Property(relation.PivotRelatedIdPropertyName).CurrentValue!, relation.RelatedKeyType))))
+        {
+            if (pairGroup.Count() > 1)
+            {
+                throw new InvalidOperationException($"Morph pivot relationship '{relation.PivotType.Name}.{relation.RelationshipName}' allows only one pivot row for pair '{relation.PrincipalAlias}:{pairGroup.Key.Principal}:{pairGroup.Key.Related}'.");
+            }
+
+            var trackedEntry = pairGroup.Single();
+            var principalId = PolymorphicValueConverter.ConvertForAssignment(trackedEntry.Property(relation.PivotIdPropertyName).CurrentValue, relation.PrincipalKeyType)!;
+            var relatedId = CreateLookupKey(trackedEntry.Property(relation.PivotRelatedIdPropertyName).CurrentValue!, relation.RelatedKeyType);
+            var trackedPrimaryKey = GetEntryPrimaryKey(trackedEntry);
+            var matches = queryAsync
+                ? await PolymorphicQueryExecutor.ListByTwoPropertiesAsync(
+                    dbContext,
+                    relation.PivotType,
+                    relation.PivotTypePropertyName,
+                    typeof(string),
+                    relation.PrincipalAlias,
+                    relation.PivotIdPropertyName,
+                    relation.PrincipalKeyType,
+                    principalId,
+                    cancellationToken)
+                : PolymorphicQueryExecutor.ListByTwoProperties(
+                    dbContext,
+                    relation.PivotType,
+                    relation.PivotTypePropertyName,
+                    typeof(string),
+                    relation.PrincipalAlias,
+                    relation.PivotIdPropertyName,
+                    relation.PrincipalKeyType,
+                    principalId);
+
+            var hasDuplicate = matches.Any(match =>
+                string.Equals(CreateLookupKey(GetPropertyValue(dbContext, match, relation.PivotRelatedIdPropertyName)!, relation.RelatedKeyType), relatedId, StringComparison.Ordinal)
+                && !string.Equals(GetEntityPrimaryKey(dbContext, match), trackedPrimaryKey, StringComparison.Ordinal));
+
+            if (hasDuplicate)
+            {
+                throw new InvalidOperationException($"Morph pivot relationship '{relation.PivotType.Name}.{relation.RelationshipName}' allows only one pivot row for pair '{relation.PrincipalAlias}:{pairGroup.Key.Principal}:{pairGroup.Key.Related}'.");
             }
         }
     }
@@ -273,6 +390,24 @@ public sealed class PolymorphicIntegrityValidationInterceptor : SaveChangesInter
     {
         var value = entry.Property(propertyName).CurrentValue ?? entry.Property(propertyName).OriginalValue;
         return value is null ? null : CreateLookupKey(value, propertyType);
+    }
+
+    private static string? GetEntryPrimaryKey(EntityEntry entry)
+    {
+        var primaryKey = entry.Metadata.FindPrimaryKey();
+        if (primaryKey is null || primaryKey.Properties.Count != 1)
+        {
+            return null;
+        }
+
+        var keyProperty = primaryKey.Properties[0];
+        var value = entry.Property(keyProperty.Name).CurrentValue ?? entry.Property(keyProperty.Name).OriginalValue;
+        return value is null ? null : CreateLookupKey(value, keyProperty.ClrType);
+    }
+
+    private static string? GetEntityPrimaryKey(DbContext dbContext, object entity)
+    {
+        return GetEntryPrimaryKey(dbContext.Entry(entity));
     }
 
     private static string CreateLookupKey(object value, Type propertyType)

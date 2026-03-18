@@ -105,6 +105,28 @@ internal static class PolymorphicMemberAccessorCache
         }
     }
 
+    public static void RemoveCollectionValue(object target, string propertyName, object value)
+    {
+        var accessor = GetAccessor(target.GetType(), propertyName);
+        if (accessor.Getter is null || accessor.ElementType is null)
+        {
+            throw new InvalidOperationException($"Property '{target.GetType().Name}.{propertyName}' must be a writable collection navigation.");
+        }
+
+        var collection = accessor.Getter(target);
+        if (collection is null)
+        {
+            return;
+        }
+
+        if (accessor.CollectionRemove is null)
+        {
+            throw new InvalidOperationException($"Property '{target.GetType().Name}.{propertyName}' must implement ICollection<{accessor.ElementType.Name}>.");
+        }
+
+        accessor.CollectionRemove(collection, value);
+    }
+
     private static MemberAccessor GetAccessor(Type type, string propertyName)
     {
         return Accessors.GetOrAdd((type, propertyName), static key => CreateAccessor(key.Type, key.PropertyName));
@@ -127,6 +149,7 @@ internal static class PolymorphicMemberAccessorCache
             ListFactory = CreateListFactory(property.PropertyType),
             CollectionAdd = CreateCollectionAdd(property.PropertyType),
             CollectionContains = CreateCollectionContains(property.PropertyType),
+            CollectionRemove = CreateCollectionRemove(property.PropertyType),
         };
     }
 
@@ -172,6 +195,28 @@ internal static class PolymorphicMemberAccessorCache
         var castValue = Expression.Convert(value, elementType);
         var add = Expression.Call(castTarget, collectionType.GetMethod(nameof(ICollection<object>.Add))!, castValue);
         return Expression.Lambda<Action<object, object>>(add, target, value).Compile();
+    }
+
+    private static Action<object, object>? CreateCollectionRemove(Type propertyType)
+    {
+        var elementType = propertyType.GenericTypeArguments.FirstOrDefault();
+        if (elementType is null)
+        {
+            return null;
+        }
+
+        var collectionType = typeof(ICollection<>).MakeGenericType(elementType);
+        if (!collectionType.IsAssignableFrom(propertyType))
+        {
+            return null;
+        }
+
+        var target = Expression.Parameter(typeof(object), "target");
+        var value = Expression.Parameter(typeof(object), "value");
+        var castTarget = Expression.Convert(target, collectionType);
+        var castValue = Expression.Convert(value, elementType);
+        var remove = Expression.Call(castTarget, collectionType.GetMethod(nameof(ICollection<object>.Remove))!, castValue);
+        return Expression.Lambda<Action<object, object>>(remove, target, value).Compile();
     }
 
     private static InvalidOperationException CreateMissingWritablePropertyException(Type targetType, string propertyName)
@@ -230,5 +275,7 @@ internal static class PolymorphicMemberAccessorCache
         public Action<object, object>? CollectionAdd { get; init; }
 
         public Func<object, object, bool>? CollectionContains { get; init; }
+
+        public Action<object, object>? CollectionRemove { get; init; }
     }
 }
