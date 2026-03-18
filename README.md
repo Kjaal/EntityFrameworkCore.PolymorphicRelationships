@@ -209,13 +209,13 @@ The package currently supports native translated query shapes for:
 - `morphMany.Count` comparisons such as `> 0`, `> 1`, `== 0`, and `!= 0`
 - owner-property ordering for `morphTo` when the owner type is explicitly cast in the query
 
-Provider support for translated query shapes is currently exercised in CI and tests in this order:
+Provider support for translated query shapes is currently exercised through dedicated execution coverage for:
 
 1. PostgreSQL
-2. SQLite
-3. SQL Server
+2. SQL Server
+3. MySQL
 
-PostgreSQL is the primary relational target for translated polymorphic query behavior. SQLite is used for fast relational coverage in tests, and SQL Server currently has smoke/query-generation coverage. Other providers should be treated as unsupported until they have dedicated execution coverage.
+SQLite continues to provide the fast relational test bed for the broader library suite. PostgreSQL remains the primary relational target for translated polymorphic query behavior, while SQL Server and MySQL now have provider-specific execution scenarios in the integration test matrix.
 
 Native translated query support is intentionally narrower than native `Select(...)` projection support. Unsupported shapes should continue to use `IncludeMorph(...)` or the lower-level helper APIs.
 
@@ -317,7 +317,7 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 - tracked removal sync for loaded morph collections and loaded `morphOne` navigations
 - migration snapshot and scaffolding compatibility for supported helpers
 - translated relational query support for selected native `Where(...)` / `OrderBy(...)` polymorphic shapes
-- EF Core 8 / `.NET 8` target with SQLite, PostgreSQL, and SQL Server coverage, plus CI lanes for Windows and PostgreSQL
+- EF Core 8 / `.NET 8` target with SQLite plus provider-specific PostgreSQL, SQL Server, and MySQL execution coverage
 
 ## Current limitations
 
@@ -334,7 +334,7 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 ## Roadmap
 
 1. Expand native translated polymorphic query support beyond current `Any()` / `Count` / owner-ordering shapes
-2. Deepen PostgreSQL-first provider coverage and improve SQL Server execution coverage beyond smoke tests
+2. Deepen provider parity across PostgreSQL, SQL Server, MySQL, and additional relational providers
 3. Expand Laravel parity around custom pivot behavior and relationship ergonomics
 
 ## Packaging

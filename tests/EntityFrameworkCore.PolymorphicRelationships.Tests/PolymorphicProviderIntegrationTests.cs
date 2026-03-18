@@ -1,52 +1,83 @@
+using System.ComponentModel.DataAnnotations.Schema;
+using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using MySqlConnector;
 using Npgsql;
-using System.Text.Json;
+using Pomelo.EntityFrameworkCore.MySql.Infrastructure;
 
 namespace EntityFrameworkCore.PolymorphicRelationships.Tests;
 
 public sealed class PolymorphicProviderIntegrationTests
 {
     [Fact]
-    public async Task PostgreSql_supports_translated_polymorphic_queries()
+    public async Task PostgreSql_executes_runtime_and_translated_polymorphic_queries()
     {
-        var databaseName = $"polymorphic_pkg_test_{Guid.NewGuid():N}";
-        var connectionString = CreatePostgresConnectionString(databaseName);
+        await RunProviderScenarioAsync(ProviderBackend.PostgreSql);
+    }
 
-        if (!await CanConnectToPostgresAsync())
+    [Fact]
+    public async Task SqlServer_executes_runtime_and_translated_polymorphic_queries()
+    {
+        await RunProviderScenarioAsync(ProviderBackend.SqlServer);
+    }
+
+    [Fact]
+    public async Task MySql_executes_runtime_and_translated_polymorphic_queries()
+    {
+        await RunProviderScenarioAsync(ProviderBackend.MySql);
+    }
+
+    private static async Task RunProviderScenarioAsync(ProviderBackend backend)
+    {
+        var databaseName = $"poly_pkg_{Guid.NewGuid():N}";
+
+        if (!await CanConnectAsync(backend))
         {
             return;
         }
 
         try
         {
-            await RecreatePostgresDatabaseAsync(databaseName);
+            await RecreateDatabaseAsync(backend, databaseName);
 
-            await using var dbContext = new ProviderTestDbContext(
-                new DbContextOptionsBuilder<ProviderTestDbContext>()
-                    .UseNpgsql(connectionString)
-                    .UsePolymorphicRelationships()
-                    .Options);
-
+            var connectionString = CreateConnectionString(backend, databaseName);
+            await using var dbContext = new ProviderTestDbContext(CreateOptions(backend, connectionString));
             await dbContext.Database.EnsureCreatedAsync();
 
-            var zPost = new ProviderPost { Id = 1, Title = "Zulu" };
-            var aPost = new ProviderPost { Id = 2, Title = "Alpha" };
-            var firstComment = new ProviderComment { Id = 10, Body = "Zulu comment" };
-            var secondComment = new ProviderComment { Id = 11, Body = "Alpha comment" };
-            var thirdComment = new ProviderComment { Id = 12, Body = "Zulu comment 2" };
+            var zuluPost = new ProviderPost { Title = "Zulu" };
+            var alphaPost = new ProviderPost { Title = "Alpha" };
+            var sharedTag = new ProviderTag { Name = "shared" };
+            var firstComment = new ProviderComment { Body = "Zulu comment" };
+            var secondComment = new ProviderComment { Body = "Alpha comment" };
+            var thirdComment = new ProviderComment { Body = "Zulu comment 2" };
 
-            dbContext.AddRange(zPost, aPost, firstComment, secondComment, thirdComment);
-            dbContext.SetMorphReference(firstComment, nameof(ProviderComment.Commentable), zPost);
-            dbContext.SetMorphReference(secondComment, nameof(ProviderComment.Commentable), aPost);
-            dbContext.SetMorphReference(thirdComment, nameof(ProviderComment.Commentable), zPost);
+            dbContext.AddRange(zuluPost, alphaPost, sharedTag, firstComment, secondComment, thirdComment);
+            dbContext.SetMorphReference(firstComment, nameof(ProviderComment.Commentable), zuluPost);
+            dbContext.SetMorphReference(secondComment, nameof(ProviderComment.Commentable), alphaPost);
+            dbContext.SetMorphReference(thirdComment, nameof(ProviderComment.Commentable), zuluPost);
+            dbContext.AttachMorphToMany<ProviderPost, ProviderTag, ProviderTagAssignment>(zuluPost, nameof(ProviderPost.Tags), sharedTag);
             await dbContext.SaveChangesAsync();
 
-            var postsWithComments = await dbContext.Posts.Where(entity => entity.Comments.Any()).ToListAsync();
+            Assert.True(zuluPost.Id > 0);
+            Assert.True(alphaPost.Id > 0);
+            Assert.True(sharedTag.Id > 0);
+            Assert.Equal(zuluPost.Id, firstComment.CommentableId);
+            Assert.Equal(alphaPost.Id, secondComment.CommentableId);
+
+            var loadedOwner = await dbContext.LoadMorphAsync<ProviderComment, ProviderPost>(secondComment, nameof(ProviderComment.Commentable));
+            var loadedTags = await dbContext.LoadMorphToManyAsync<ProviderPost, ProviderTag>(zuluPost, nameof(ProviderPost.Tags));
+            var includedPost = await dbContext.Posts
+                .IncludeMorph(entity => entity.Comments)
+                .Where(entity => entity.Id == zuluPost.Id)
+                .SingleAsync();
+
+            var postsWithComments = await dbContext.Posts.Where(entity => entity.Comments.Any()).OrderBy(entity => entity.Title).ToListAsync();
             var postsWithTwoComments = await dbContext.Posts.Where(entity => entity.Comments.Count >= 2).ToListAsync();
             var orderedBodies = await dbContext.Comments
                 .Where(entity => entity.CommentableType == "provider_posts")
                 .OrderBy(entity => ((ProviderPost)entity.Commentable!).Title)
+                .ThenBy(entity => entity.Body)
                 .Select(entity => entity.Body)
                 .ToListAsync();
             var filteredBodies = await dbContext.Comments
@@ -54,54 +85,119 @@ public sealed class PolymorphicProviderIntegrationTests
                 .Select(entity => entity.Body)
                 .ToListAsync();
 
+            Assert.NotNull(loadedOwner);
+            Assert.Equal(alphaPost.Id, loadedOwner!.Id);
+            Assert.Single(loadedTags);
+            Assert.Equal(sharedTag.Id, loadedTags[0].Id);
+            Assert.Equal(2, includedPost.Comments.Count);
             Assert.Equal(2, postsWithComments.Count);
             Assert.Single(postsWithTwoComments);
-            Assert.Equal(zPost.Id, postsWithTwoComments[0].Id);
-            Assert.Equal(new[] { secondComment.Body, firstComment.Body }, orderedBodies);
+            Assert.Equal(zuluPost.Id, postsWithTwoComments[0].Id);
+            Assert.Equal(new[] { secondComment.Body, firstComment.Body, thirdComment.Body }, orderedBodies);
             Assert.Equal(new[] { secondComment.Body }, filteredBodies);
         }
         finally
         {
-            await DropPostgresDatabaseAsync(databaseName);
+            await DropDatabaseAsync(backend, databaseName);
         }
     }
 
-    [Fact]
-    public void SqlServer_provider_can_build_translated_polymorphic_query()
+    private static DbContextOptions<ProviderTestDbContext> CreateOptions(ProviderBackend backend, string connectionString)
     {
-        var options = new DbContextOptionsBuilder<ProviderTestDbContext>()
-            .UseSqlServer(CreateSqlServerConnectionString())
-            .UsePolymorphicRelationships()
-            .Options;
+        var builder = new DbContextOptionsBuilder<ProviderTestDbContext>();
 
-        using var dbContext = new ProviderTestDbContext(options);
+        switch (backend)
+        {
+            case ProviderBackend.PostgreSql:
+                builder.UseNpgsql(connectionString);
+                break;
+            case ProviderBackend.SqlServer:
+                builder.UseSqlServer(connectionString);
+                break;
+            case ProviderBackend.MySql:
+                builder.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString));
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(backend), backend, null);
+        }
 
-        var query = dbContext.Comments
-            .Where(entity => entity.CommentableType == "provider_posts")
-            .OrderBy(entity => ((ProviderPost)entity.Commentable!).Title)
-            .Select(entity => entity.Body);
+        builder.UsePolymorphicRelationships();
+        return builder.Options;
+    }
 
-        var filteredQuery = dbContext.Comments
-            .Where(entity => ((ProviderPost)entity.Commentable!).Title == "Alpha")
-            .Select(entity => entity.Body);
+    private static async Task<bool> CanConnectAsync(ProviderBackend backend)
+    {
+        try
+        {
+            switch (backend)
+            {
+                case ProviderBackend.PostgreSql:
+                    await using (var connection = new NpgsqlConnection(GetPostgresBaseConnectionString()))
+                    {
+                        await connection.OpenAsync();
+                    }
 
-        var countQuery = dbContext.Posts
-            .Where(entity => entity.Comments.Count >= 2)
-            .Select(entity => entity.Id);
+                    return true;
+                case ProviderBackend.SqlServer:
+                    await using (var connection = new SqlConnection(GetSqlServerBaseConnectionString()))
+                    {
+                        await connection.OpenAsync();
+                    }
 
-        var queryString = query.ToQueryString();
-        var filteredQueryString = filteredQuery.ToQueryString();
-        var countQueryString = countQuery.ToQueryString();
-        Assert.Contains("ORDER BY", queryString, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("WHERE", filteredQueryString, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("COUNT", countQueryString, StringComparison.OrdinalIgnoreCase);
+                    return true;
+                case ProviderBackend.MySql:
+                    await using (var connection = new MySqlConnection(GetMySqlBaseConnectionString()))
+                    {
+                        await connection.OpenAsync();
+                    }
+
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static Task RecreateDatabaseAsync(ProviderBackend backend, string databaseName)
+    {
+        return backend switch
+        {
+            ProviderBackend.PostgreSql => RecreatePostgresDatabaseAsync(databaseName),
+            ProviderBackend.SqlServer => RecreateSqlServerDatabaseAsync(databaseName),
+            ProviderBackend.MySql => RecreateMySqlDatabaseAsync(databaseName),
+            _ => throw new ArgumentOutOfRangeException(nameof(backend), backend, null),
+        };
+    }
+
+    private static Task DropDatabaseAsync(ProviderBackend backend, string databaseName)
+    {
+        return backend switch
+        {
+            ProviderBackend.PostgreSql => DropPostgresDatabaseAsync(databaseName),
+            ProviderBackend.SqlServer => DropSqlServerDatabaseAsync(databaseName),
+            ProviderBackend.MySql => DropMySqlDatabaseAsync(databaseName),
+            _ => throw new ArgumentOutOfRangeException(nameof(backend), backend, null),
+        };
+    }
+
+    private static string CreateConnectionString(ProviderBackend backend, string databaseName)
+    {
+        return backend switch
+        {
+            ProviderBackend.PostgreSql => CreatePostgresConnectionString(databaseName),
+            ProviderBackend.SqlServer => CreateSqlServerConnectionString(databaseName),
+            ProviderBackend.MySql => CreateMySqlConnectionString(databaseName),
+            _ => throw new ArgumentOutOfRangeException(nameof(backend), backend, null),
+        };
     }
 
     private static string CreatePostgresConnectionString(string databaseName)
     {
-        var baseConnectionString = GetPostgresBaseConnectionString();
-
-        var builder = new NpgsqlConnectionStringBuilder(baseConnectionString)
+        var builder = new NpgsqlConnectionStringBuilder(GetPostgresBaseConnectionString())
         {
             Database = databaseName,
         };
@@ -111,9 +207,7 @@ public sealed class PolymorphicProviderIntegrationTests
 
     private static async Task RecreatePostgresDatabaseAsync(string databaseName)
     {
-        var maintenance = GetPostgresBaseConnectionString();
-
-        await using var connection = new NpgsqlConnection(maintenance);
+        await using var connection = new NpgsqlConnection(GetPostgresBaseConnectionString());
         await connection.OpenAsync();
 
         await using (var dropCommand = connection.CreateCommand())
@@ -131,9 +225,7 @@ public sealed class PolymorphicProviderIntegrationTests
 
     private static async Task DropPostgresDatabaseAsync(string databaseName)
     {
-        var maintenance = GetPostgresBaseConnectionString();
-
-        await using var connection = new NpgsqlConnection(maintenance);
+        await using var connection = new NpgsqlConnection(GetPostgresBaseConnectionString());
         await connection.OpenAsync();
 
         await using var command = connection.CreateCommand();
@@ -141,31 +233,90 @@ public sealed class PolymorphicProviderIntegrationTests
         await command.ExecuteNonQueryAsync();
     }
 
-    private static string CreateSqlServerConnectionString()
+    private static string CreateSqlServerConnectionString(string databaseName)
     {
-        var baseConnectionString = Environment.GetEnvironmentVariable("POLYMORPHIC_TEST_SQLSERVER")
-            ?? "Server=localhost;Database=master;Integrated Security=True;TrustServerCertificate=True;Encrypt=False";
-
-        var builder = new SqlConnectionStringBuilder(baseConnectionString)
+        var builder = new SqlConnectionStringBuilder(GetSqlServerBaseConnectionString())
         {
-            InitialCatalog = "master",
+            InitialCatalog = databaseName,
         };
 
         return builder.ConnectionString;
     }
 
-    private static async Task<bool> CanConnectToPostgresAsync()
+    private static async Task RecreateSqlServerDatabaseAsync(string databaseName)
     {
-        try
+        await using var connection = new SqlConnection(GetSqlServerBaseConnectionString());
+        await connection.OpenAsync();
+
+        await using (var dropCommand = connection.CreateCommand())
         {
-            await using var connection = new NpgsqlConnection(GetPostgresBaseConnectionString());
-            await connection.OpenAsync();
-            return true;
+            dropCommand.CommandText = $@"
+IF DB_ID(N'{databaseName}') IS NOT NULL
+BEGIN
+    ALTER DATABASE [{databaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE [{databaseName}];
+END";
+            await dropCommand.ExecuteNonQueryAsync();
         }
-        catch
+
+        await using (var createCommand = connection.CreateCommand())
         {
-            return false;
+            createCommand.CommandText = $"CREATE DATABASE [{databaseName}];";
+            await createCommand.ExecuteNonQueryAsync();
         }
+    }
+
+    private static async Task DropSqlServerDatabaseAsync(string databaseName)
+    {
+        await using var connection = new SqlConnection(GetSqlServerBaseConnectionString());
+        await connection.OpenAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = $@"
+IF DB_ID(N'{databaseName}') IS NOT NULL
+BEGIN
+    ALTER DATABASE [{databaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE [{databaseName}];
+END";
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static string CreateMySqlConnectionString(string databaseName)
+    {
+        var builder = new MySqlConnectionStringBuilder(GetMySqlBaseConnectionString())
+        {
+            Database = databaseName,
+        };
+
+        return builder.ConnectionString;
+    }
+
+    private static async Task RecreateMySqlDatabaseAsync(string databaseName)
+    {
+        await using var connection = new MySqlConnection(GetMySqlBaseConnectionString());
+        await connection.OpenAsync();
+
+        await using (var dropCommand = connection.CreateCommand())
+        {
+            dropCommand.CommandText = $"DROP DATABASE IF EXISTS `{databaseName}`;";
+            await dropCommand.ExecuteNonQueryAsync();
+        }
+
+        await using (var createCommand = connection.CreateCommand())
+        {
+            createCommand.CommandText = $"CREATE DATABASE `{databaseName}`;";
+            await createCommand.ExecuteNonQueryAsync();
+        }
+    }
+
+    private static async Task DropMySqlDatabaseAsync(string databaseName)
+    {
+        await using var connection = new MySqlConnection(GetMySqlBaseConnectionString());
+        await connection.OpenAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"DROP DATABASE IF EXISTS `{databaseName}`;";
+        await command.ExecuteNonQueryAsync();
     }
 
     private static string GetPostgresBaseConnectionString()
@@ -197,11 +348,27 @@ public sealed class PolymorphicProviderIntegrationTests
         return "Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres";
     }
 
+    private static string GetSqlServerBaseConnectionString()
+    {
+        return Environment.GetEnvironmentVariable("POLYMORPHIC_TEST_SQLSERVER")
+            ?? "Server=localhost,1433;User ID=sa;Password=Strong!Passw0rd;TrustServerCertificate=True;Encrypt=False;Database=master";
+    }
+
+    private static string GetMySqlBaseConnectionString()
+    {
+        return Environment.GetEnvironmentVariable("POLYMORPHIC_TEST_MYSQL")
+            ?? "Server=localhost;Port=3306;Database=mysql;User=root;Password=mysql;SslMode=None;AllowPublicKeyRetrieval=True";
+    }
+
     private sealed class ProviderTestDbContext(DbContextOptions<ProviderTestDbContext> options) : DbContext(options)
     {
         public DbSet<ProviderPost> Posts => Set<ProviderPost>();
 
         public DbSet<ProviderComment> Comments => Set<ProviderComment>();
+
+        public DbSet<ProviderTag> Tags => Set<ProviderTag>();
+
+        public DbSet<ProviderTagAssignment> TagAssignments => Set<ProviderTagAssignment>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -212,6 +379,13 @@ public sealed class PolymorphicProviderIntegrationTests
                 polymorphic.Entity<ProviderComment>()
                     .MorphTo(nameof(ProviderComment.Commentable), entity => entity.CommentableType, entity => entity.CommentableId)
                     .MorphMany<ProviderPost>(nameof(ProviderPost.Comments));
+
+                polymorphic.MorphToMany<ProviderPost, ProviderTag, ProviderTagAssignment, int, int>(
+                    nameof(ProviderPost.Tags),
+                    nameof(ProviderTag.Posts),
+                    entity => entity.TaggableType,
+                    entity => entity.TaggableId,
+                    entity => entity.TagId);
             });
 
             base.OnModelCreating(modelBuilder);
@@ -224,7 +398,11 @@ public sealed class PolymorphicProviderIntegrationTests
 
         public string Title { get; set; } = string.Empty;
 
+        [NotMapped]
         public List<ProviderComment> Comments { get; set; } = new();
+
+        [NotMapped]
+        public List<ProviderTag> Tags { get; set; } = new();
     }
 
     private sealed class ProviderComment
@@ -237,7 +415,35 @@ public sealed class PolymorphicProviderIntegrationTests
 
         public int? CommentableId { get; set; }
 
-        [System.ComponentModel.DataAnnotations.Schema.NotMapped]
+        [NotMapped]
         public object? Commentable { get; set; }
+    }
+
+    private sealed class ProviderTag
+    {
+        public int Id { get; set; }
+
+        public string Name { get; set; } = string.Empty;
+
+        [NotMapped]
+        public List<ProviderPost> Posts { get; set; } = new();
+    }
+
+    private sealed class ProviderTagAssignment
+    {
+        public int Id { get; set; }
+
+        public string? TaggableType { get; set; }
+
+        public int TaggableId { get; set; }
+
+        public int TagId { get; set; }
+    }
+
+    private enum ProviderBackend
+    {
+        PostgreSql,
+        SqlServer,
+        MySql,
     }
 }

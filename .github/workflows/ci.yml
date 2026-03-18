@@ -63,3 +63,76 @@ jobs:
 
       - name: Test library suite with PostgreSQL
         run: dotnet test "EntityFrameworkCore.PolymorphicRelationships.sln" --configuration Release --no-restore
+
+  test-linux-mysql:
+    name: Linux MySQL
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: mysql
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POLYMORPHIC_TEST_MYSQL: Server=127.0.0.1;Port=3306;Database=mysql;User=root;Password=mysql;SslMode=None;AllowPublicKeyRetrieval=True
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore "EntityFrameworkCore.PolymorphicRelationships.sln"
+
+      - name: Test library suite with MySQL
+        run: dotnet test "EntityFrameworkCore.PolymorphicRelationships.sln" --configuration Release --no-restore
+
+  test-linux-sqlserver:
+    name: Linux SQL Server
+    runs-on: ubuntu-latest
+
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          SA_PASSWORD: Strong!Passw0rd
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Strong!Passw0rd -Q 'SELECT 1' -C || exit 1"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 15
+
+    env:
+      POLYMORPHIC_TEST_SQLSERVER: Server=localhost,1433;User ID=sa;Password=Strong!Passw0rd;TrustServerCertificate=True;Encrypt=False;Database=master
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore "EntityFrameworkCore.PolymorphicRelationships.sln"
+
+      - name: Test library suite with SQL Server
+        run: dotnet test "EntityFrameworkCore.PolymorphicRelationships.sln" --configuration Release --no-restore
