@@ -173,12 +173,20 @@ var orderedComments = await dbContext.Comments
     .Where(entity => entity.CommentableType == "posts")
     .OrderBy(entity => ((Post)entity.Commentable!).Title)
     .ToListAsync();
+
+var postsWithoutComments = await dbContext.Posts
+    .Where(entity => entity.Comments.Count == 0)
+    .ToListAsync();
+
+var postsWithMultipleComments = await dbContext.Posts
+    .Where(entity => entity.Comments.Count > 1)
+    .ToListAsync();
 ```
 
 The package currently supports native translated query shapes for:
 
 - `morphMany.Any()`
-- `morphMany.Count > 0`
+- `morphMany.Count` comparisons such as `> 0`, `> 1`, `== 0`, and `!= 0`
 - owner-property ordering for `morphTo` when the owner type is explicitly cast in the query
 
 Provider support for translated query shapes is prioritized in this order:
@@ -186,6 +194,8 @@ Provider support for translated query shapes is prioritized in this order:
 1. PostgreSQL
 2. SQLite
 3. SQL Server
+
+PostgreSQL is the primary relational target for translated polymorphic query behavior. SQLite is used for fast relational coverage in tests, and SQL Server currently has smoke/query-generation coverage.
 
 Native translated query support is intentionally narrower than native `Select(...)` projection support. Unsupported shapes should continue to use `IncludeMorph(...)` or the lower-level helper APIs.
 
@@ -291,14 +301,15 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 - many-to-many relationships require an explicit pivot entity
 - composite owner keys are not supported
 - one-of-many selection is limited to a single ordering expression
-- translated native query support currently focuses on `Any()`, `Count > 0`, and owner-property ordering rather than the full space of polymorphic query expressions
+- translated native query support currently focuses on selected `morphMany` aggregate filters and owner-property ordering rather than the full space of polymorphic query expressions
+- native translated owner-property access currently expects an explicit owner cast in the query expression
 - Laravel features such as `morphToMany` custom pivot behavior and broader relationship macros are not yet fully mirrored
 
 ## Roadmap
 
-1. Configurable validation levels for existence checks and save-time enforcement
-2. Richer eager-loading plans for nested `morphToMany` and `morphedByMany` batches
-3. Expanded Laravel parity around custom pivot behavior and relationship ergonomics
+1. Expand native translated polymorphic query support beyond current `Any()` / `Count` / owner-ordering shapes
+2. Deepen PostgreSQL-first provider coverage and improve SQL Server execution coverage beyond smoke tests
+3. Expand Laravel parity around custom pivot behavior and relationship ergonomics
 
 ## Packaging
 

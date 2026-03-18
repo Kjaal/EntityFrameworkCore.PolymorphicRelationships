@@ -444,6 +444,34 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task Native_where_supports_polymorphic_collection_count_comparisons_beyond_zero_on_relational_provider()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var firstPost = new Post { Id = 71, Title = "First" };
+        var secondPost = new Post { Id = 72, Title = "Second" };
+        var thirdPost = new Post { Id = 73, Title = "Third" };
+        var firstComment = new Comment { Id = 715, Body = "One" };
+        var secondComment = new Comment { Id = 716, Body = "Two" };
+
+        dbContext.AddRange(firstPost, secondPost, thirdPost, firstComment, secondComment);
+        dbContext.SetMorphReference(firstComment, nameof(Comment.Commentable), firstPost);
+        dbContext.SetMorphReference(secondComment, nameof(Comment.Commentable), firstPost);
+        await dbContext.SaveChangesAsync();
+
+        var gtOne = await dbContext.Posts.Where(entity => entity.Comments.Count > 1).Select(entity => entity.Id).ToListAsync();
+        var eqZero = await dbContext.Posts.Where(entity => entity.Comments.Count == 0).Select(entity => entity.Id).OrderBy(entity => entity).ToListAsync();
+        var neqZero = await dbContext.Posts.Where(entity => entity.Comments.Count != 0).Select(entity => entity.Id).ToListAsync();
+
+        Assert.Equal(new[] { firstPost.Id }, gtOne);
+        Assert.Equal(new[] { secondPost.Id, thirdPost.Id }, eqZero);
+        Assert.Equal(new[] { firstPost.Id }, neqZero);
+    }
+
+    [Fact]
     public async Task Native_where_supports_polymorphic_collection_any_on_relational_provider()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");

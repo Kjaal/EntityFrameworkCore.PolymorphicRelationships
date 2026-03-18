@@ -238,19 +238,9 @@ public sealed class PolymorphicQueryExpressionInterceptor : IQueryExpressionInte
                 return false;
             }
 
-            var anyExpression = BuildCollectionAnyMarker(collectionExpression.Expression!, collectionExpression.Member.Name, relationshipKind);
-            rewritten = node.NodeType switch
-            {
-                ExpressionType.GreaterThan when rightValue == 0 => anyExpression,
-                ExpressionType.GreaterThanOrEqual when rightValue == 1 => anyExpression,
-                ExpressionType.NotEqual when rightValue == 0 => anyExpression,
-                ExpressionType.Equal when rightValue == 0 => Expression.Not(anyExpression),
-                ExpressionType.LessThanOrEqual when rightValue == 0 => Expression.Not(anyExpression),
-                ExpressionType.LessThan when rightValue == 1 => Expression.Not(anyExpression),
-                _ => null!,
-            };
-
-            return rewritten is not null;
+            var countExpression = BuildCollectionCountMarker(collectionExpression.Expression!, collectionExpression.Member.Name, relationshipKind);
+            rewritten = Expression.MakeBinary(node.NodeType, countExpression, Expression.Constant(rightValue));
+            return true;
         }
 
         private bool TryRewriteMorphOwnerProperty(MemberExpression node, out Expression rewritten)
