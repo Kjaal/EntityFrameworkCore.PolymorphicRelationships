@@ -1,6 +1,9 @@
 using System.ComponentModel.DataAnnotations.Schema;
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Data.Sqlite;
 
 namespace EntityFrameworkCore.PolymorphicRelationships.Tests;
@@ -50,6 +53,36 @@ public sealed class PolymorphicRelationshipTests
         Assert.Equal(postComment.Id, loadedComments[0].Id);
         Assert.Single(post.Comments);
         Assert.Equal(postComment.Id, post.Comments[0].Id);
+    }
+
+    [Fact]
+    public async Task LoadMorphMany_batches_large_owner_sets_without_single_huge_in_predicate()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var posts = Enumerable.Range(1, 600)
+            .Select(index => new Post { Id = index, Title = $"Post {index}" })
+            .ToList();
+        var comments = Enumerable.Range(1, 600)
+            .Select(index => new Comment { Id = 10_000 + index, Body = $"Comment {index}" })
+            .ToList();
+
+        dbContext.AddRange(posts);
+        dbContext.AddRange(comments);
+        for (var index = 0; index < posts.Count; index++)
+        {
+            dbContext.SetMorphReference(comments[index], nameof(Comment.Commentable), posts[index]);
+        }
+
+        await dbContext.SaveChangesAsync();
+
+        var loaded = await dbContext.LoadMorphManyAsync<Post, Comment>(posts, nameof(Post.Comments));
+
+        Assert.Equal(posts.Count, loaded.Count);
+        Assert.All(posts, post => Assert.Single(loaded[post]));
     }
 
     [Fact]
@@ -124,6 +157,26 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task SetMorphReference_allows_store_generated_owner_keys_that_are_null_before_save()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateNullableKeySqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var post = new NullableKeyPost { Title = "Generated owner" };
+        var comment = new NullableKeyComment { Body = "Generated child" };
+
+        dbContext.AddRange(post, comment);
+        dbContext.SetMorphReference(comment, nameof(NullableKeyComment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        Assert.True(post.Id > 0);
+        Assert.Equal("nullable_posts", comment.CommentableType);
+        Assert.Equal(post.Id, comment.CommentableId);
+    }
+
+    [Fact]
     public async Task SaveChanges_rolls_back_temporary_key_repairs_when_repair_phase_fails()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -134,7 +187,7 @@ public sealed class PolymorphicRelationshipTests
             await setupContext.Database.EnsureCreatedAsync();
         }
 
-        await using (var failingContext = CreateSqliteContext(connection, interceptors: [new FailingSecondSaveInterceptor()]))
+        await using (var failingContext = CreateSqliteContext(connection, interceptors: [new FailingRepairUpdateInterceptor()]))
         {
             var post = new Post { Title = "Generated owner" };
             var comment = new Comment { Body = "Generated child" };
@@ -149,6 +202,30 @@ public sealed class PolymorphicRelationshipTests
         await using var assertContext = CreateSqliteContext(connection);
         Assert.Equal(0, await assertContext.Posts.CountAsync());
         Assert.Equal(0, await assertContext.Comments.CountAsync());
+    }
+
+    [Fact]
+    public async Task SaveChanges_retries_temporary_key_repairs_with_execution_strategy()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var transientInterceptor = new FailFirstRepairUpdateTransientlyInterceptor();
+        await using var dbContext = CreateRetryingSqliteContext(connection, transientInterceptor);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var post = new Post { Title = "Generated owner" };
+        var comment = new Comment { Body = "Generated child" };
+
+        dbContext.AddRange(post, comment);
+        dbContext.SetMorphReference(comment, nameof(Comment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        Assert.Equal(1, transientInterceptor.FailureCount);
+        Assert.True(post.Id > 0);
+        Assert.Equal(post.Id, comment.CommentableId);
+
+        var storedComment = await dbContext.Comments.AsNoTracking().SingleAsync(entity => entity.Id == comment.Id);
+        Assert.Equal(post.Id, storedComment.CommentableId);
     }
 
     [Fact]
@@ -845,6 +922,23 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public void UsePolymorphicRelationships_is_idempotent_for_interceptor_registration()
+    {
+        var optionsBuilder = new DbContextOptionsBuilder<TestDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString("N"));
+
+        optionsBuilder.UsePolymorphicRelationships();
+        optionsBuilder.UsePolymorphicRelationships();
+
+        var interceptors = optionsBuilder.Options.FindExtension<CoreOptionsExtension>()?.Interceptors?.ToList() ?? [];
+
+        Assert.Equal(1, interceptors.Count(interceptor => interceptor.GetType().Name == "PolymorphicQueryExpressionInterceptor"));
+        Assert.Equal(1, interceptors.Count(interceptor => interceptor.GetType().Name == "PolymorphicNavigationSyncInterceptor"));
+        Assert.Equal(1, interceptors.Count(interceptor => interceptor.GetType().Name == "PolymorphicCascadeDeleteInterceptor"));
+        Assert.Equal(1, interceptors.Count(interceptor => interceptor.GetType().Name == "PolymorphicIntegrityValidationInterceptor"));
+    }
+
+    [Fact]
     public async Task Guid_primary_keys_work_for_morph_relationships()
     {
         await using var dbContext = CreateGuidContext();
@@ -1078,34 +1172,133 @@ public sealed class PolymorphicRelationshipTests
         return new TestDbContext(optionsBuilder.Options);
     }
 
-    private sealed class FailingSecondSaveInterceptor : SaveChangesInterceptor
+    private static NullableKeyDbContext CreateNullableKeySqliteContext(SqliteConnection connection)
     {
-        private int _saveAttempts;
+        var options = new DbContextOptionsBuilder<NullableKeyDbContext>()
+            .UseSqlite(connection)
+            .UsePolymorphicRelationships()
+            .Options;
 
-        public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
+        return new NullableKeyDbContext(options);
+    }
+
+    private static TestDbContext CreateRetryingSqliteContext(SqliteConnection connection, params IInterceptor[] interceptors)
+    {
+        var optionsBuilder = new DbContextOptionsBuilder<TestDbContext>()
+            .UseSqlite(connection)
+            .ReplaceService<IExecutionStrategyFactory, RetryOnceExecutionStrategyFactory>();
+
+        if (interceptors.Length > 0)
         {
-            ThrowIfSecondSave();
-            return base.SavingChanges(eventData, result);
+            optionsBuilder.AddInterceptors(interceptors);
         }
 
-        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
-            DbContextEventData eventData,
+        optionsBuilder.UsePolymorphicRelationships();
+        return new TestDbContext(optionsBuilder.Options);
+    }
+
+    private sealed class FailingRepairUpdateInterceptor : DbCommandInterceptor
+    {
+        private bool _hasThrown;
+
+        public override InterceptionResult<int> NonQueryExecuting(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result)
+        {
+            ThrowIfRepairUpdate(command);
+            return base.NonQueryExecuting(command, eventData, result);
+        }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
             InterceptionResult<int> result,
             CancellationToken cancellationToken = default)
         {
-            ThrowIfSecondSave();
-            return base.SavingChangesAsync(eventData, result, cancellationToken);
+            ThrowIfRepairUpdate(command);
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
         }
 
-        private void ThrowIfSecondSave()
+        private void ThrowIfRepairUpdate(DbCommand command)
         {
-            _saveAttempts++;
-            if (_saveAttempts < 2)
+            if (_hasThrown)
             {
                 return;
             }
 
+            var commandText = command.CommandText;
+            if (!commandText.Contains("UPDATE", StringComparison.OrdinalIgnoreCase)
+                || !commandText.Contains("Comments", StringComparison.OrdinalIgnoreCase)
+                || !commandText.Contains("CommentableId", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            _hasThrown = true;
             throw new InvalidOperationException("Simulated repair failure.");
+        }
+    }
+
+    private sealed class FailFirstRepairUpdateTransientlyInterceptor : DbCommandInterceptor
+    {
+        public int FailureCount { get; private set; }
+
+        public override InterceptionResult<int> NonQueryExecuting(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result)
+        {
+            ThrowIfFirstRepairUpdate(command);
+            return base.NonQueryExecuting(command, eventData, result);
+        }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            ThrowIfFirstRepairUpdate(command);
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        private void ThrowIfFirstRepairUpdate(DbCommand command)
+        {
+            if (FailureCount > 0)
+            {
+                return;
+            }
+
+            var commandText = command.CommandText;
+            if (!commandText.Contains("UPDATE", StringComparison.OrdinalIgnoreCase)
+                || !commandText.Contains("Comments", StringComparison.OrdinalIgnoreCase)
+                || !commandText.Contains("CommentableId", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            FailureCount++;
+            throw new SimulatedTransientException();
+        }
+    }
+
+    private sealed class SimulatedTransientException : Exception;
+
+    private sealed class RetryOnceExecutionStrategyFactory(ExecutionStrategyDependencies dependencies) : IExecutionStrategyFactory
+    {
+        public IExecutionStrategy Create()
+        {
+            return new RetryOnceExecutionStrategy(dependencies);
+        }
+    }
+
+    private sealed class RetryOnceExecutionStrategy(ExecutionStrategyDependencies dependencies)
+        : ExecutionStrategy(dependencies, maxRetryCount: 1, maxRetryDelay: TimeSpan.Zero)
+    {
+        protected override bool ShouldRetryOn(Exception exception)
+        {
+            return exception is SimulatedTransientException;
         }
     }
 
@@ -1228,6 +1421,51 @@ public sealed class PolymorphicRelationshipTests
     private sealed class ProjectionPostResult
     {
         public List<ProjectionComment> Comments { get; set; } = new();
+    }
+
+    private sealed class NullableKeyDbContext(DbContextOptions<NullableKeyDbContext> options) : DbContext(options)
+    {
+        public DbSet<NullableKeyPost> Posts => Set<NullableKeyPost>();
+
+        public DbSet<NullableKeyComment> Comments => Set<NullableKeyComment>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.UsePolymorphicRelationships(polymorphic =>
+            {
+                polymorphic.MorphMap<NullableKeyPost>("nullable_posts");
+
+                polymorphic.Entity<NullableKeyComment>()
+                    .MorphTo(nameof(NullableKeyComment.Commentable), entity => entity.CommentableType, entity => entity.CommentableId)
+                    .MorphMany<NullableKeyPost>(nameof(NullableKeyPost.Comments));
+            });
+
+            base.OnModelCreating(modelBuilder);
+        }
+    }
+
+    private sealed class NullableKeyPost
+    {
+        public int? Id { get; set; }
+
+        public string Title { get; set; } = string.Empty;
+
+        [NotMapped]
+        public List<NullableKeyComment> Comments { get; set; } = new();
+    }
+
+    private sealed class NullableKeyComment
+    {
+        public int Id { get; set; }
+
+        public string Body { get; set; } = string.Empty;
+
+        public string? CommentableType { get; set; }
+
+        public int? CommentableId { get; set; }
+
+        [NotMapped]
+        public object? Commentable { get; set; }
     }
 
     private sealed class GuidTestDbContext(DbContextOptions<GuidTestDbContext> options) : DbContext(options)

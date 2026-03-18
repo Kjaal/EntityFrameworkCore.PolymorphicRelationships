@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Storage;
 
 namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
@@ -16,10 +15,10 @@ internal static class PolymorphicRepairSaveScopeRegistry
 
     public sealed class RepairSaveScopeState
     {
-        public bool IsActive { get; set; }
+        public bool IsExecutingWorkflow { get; set; }
 
         public bool IsRepairSave { get; set; }
 
-        public IDbContextTransaction? OwnedTransaction { get; set; }
+        public PolymorphicPendingKeyRepairRegistry.PendingRepairBatch? PendingRepairs { get; set; }
     }
 }

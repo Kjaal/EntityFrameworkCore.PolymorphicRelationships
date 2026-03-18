@@ -52,6 +52,7 @@ public sealed class PolymorphicProviderIntegrationTests
 
         if (!await CanConnectAsync(backend))
         {
+            EnsureProviderAvailabilityOrSkip(backend);
             return;
         }
 
@@ -126,6 +127,7 @@ public sealed class PolymorphicProviderIntegrationTests
 
         if (!await CanConnectAsync(backend))
         {
+            EnsureProviderAvailabilityOrSkip(backend);
             return;
         }
 
@@ -240,6 +242,27 @@ public sealed class PolymorphicProviderIntegrationTests
         {
             return false;
         }
+    }
+
+    private static void EnsureProviderAvailabilityOrSkip(ProviderBackend backend)
+    {
+        if (Environment.GetEnvironmentVariable("CI") == "true"
+            || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true"
+            || !string.IsNullOrWhiteSpace(GetProviderConnectionOverride(backend)))
+        {
+            throw new InvalidOperationException($"The {backend} provider test environment is required but could not be reached.");
+        }
+    }
+
+    private static string? GetProviderConnectionOverride(ProviderBackend backend)
+    {
+        return backend switch
+        {
+            ProviderBackend.PostgreSql => Environment.GetEnvironmentVariable("POLYMORPHIC_TEST_POSTGRES"),
+            ProviderBackend.SqlServer => Environment.GetEnvironmentVariable("POLYMORPHIC_TEST_SQLSERVER"),
+            ProviderBackend.MySql => Environment.GetEnvironmentVariable("POLYMORPHIC_TEST_MYSQL"),
+            _ => null,
+        };
     }
 
     private static Task RecreateDatabaseAsync(ProviderBackend backend, string databaseName)

@@ -6,6 +6,8 @@ namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 internal static class PolymorphicQueryableLoader
 {
+    private const int MaxValuesPerPredicate = 512;
+
     private static readonly MethodInfo WherePropertyEqualsMethod = typeof(PolymorphicQueryableLoader)
         .GetMethod(nameof(WherePropertyEqualsCore), BindingFlags.NonPublic | BindingFlags.Static)!;
 
@@ -15,6 +17,28 @@ internal static class PolymorphicQueryableLoader
     private static readonly MethodInfo OrderByPropertyMethod = typeof(PolymorphicQueryableLoader)
         .GetMethod(nameof(OrderByPropertyCore), BindingFlags.NonPublic | BindingFlags.Static)!;
 
+    public static IReadOnlyList<object> ListByPropertyValues<TEntity>(
+        IQueryable<TEntity> query,
+        string propertyName,
+        Type propertyType,
+        IEnumerable<object> values)
+        where TEntity : class
+    {
+        var convertedValues = NormalizeDistinctValues(values, propertyType);
+        if (convertedValues.Length == 0)
+        {
+            return Array.Empty<object>();
+        }
+
+        var results = new List<object>();
+        foreach (var chunk in convertedValues.Chunk(MaxValuesPerPredicate))
+        {
+            results.AddRange(WherePropertyIn(query, propertyName, propertyType, chunk).Cast<object>());
+        }
+
+        return results;
+    }
+
     public static async Task<IReadOnlyList<object>> ListByPropertyValuesAsync<TEntity>(
         IQueryable<TEntity> query,
         string propertyName,
@@ -23,25 +47,21 @@ internal static class PolymorphicQueryableLoader
         CancellationToken cancellationToken)
         where TEntity : class
     {
-        var convertedValues = values
-            .Select(value => PolymorphicValueConverter.ConvertForAssignment(value, propertyType))
-            .Where(value => value is not null)
-            .Distinct()
-            .ToArray();
+        var convertedValues = NormalizeDistinctValues(values, propertyType);
 
         if (convertedValues.Length == 0)
         {
             return Array.Empty<object>();
         }
 
-        var typedArray = Array.CreateInstance(propertyType, convertedValues.Length);
-        for (var index = 0; index < convertedValues.Length; index++)
+        var results = new List<object>();
+        foreach (var chunk in convertedValues.Chunk(MaxValuesPerPredicate))
         {
-            typedArray.SetValue(convertedValues[index], index);
+            var entities = await WherePropertyIn(query, propertyName, propertyType, chunk).ToListAsync(cancellationToken);
+            results.AddRange(entities.Cast<object>());
         }
 
-        var entities = await WherePropertyIn(query, propertyName, propertyType, convertedValues).ToListAsync(cancellationToken);
-        return entities.Cast<object>().ToList();
+        return results;
     }
 
     public static IQueryable<TEntity> WherePropertyEquals<TEntity>(
@@ -131,6 +151,15 @@ internal static class PolymorphicQueryableLoader
         return descending
             ? query.OrderByDescending(entity => EF.Property<TProperty>(entity, propertyName))
             : query.OrderBy(entity => EF.Property<TProperty>(entity, propertyName));
+    }
+
+    private static object?[] NormalizeDistinctValues(IEnumerable<object> values, Type propertyType)
+    {
+        return values
+            .Select(value => PolymorphicValueConverter.ConvertForAssignment(value, propertyType))
+            .Where(value => value is not null)
+            .Distinct()
+            .ToArray();
     }
 }
 

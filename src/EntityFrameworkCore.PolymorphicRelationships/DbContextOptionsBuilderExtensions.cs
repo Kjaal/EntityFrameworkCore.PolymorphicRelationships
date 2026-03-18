@@ -1,6 +1,7 @@
 using EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 using EntityFrameworkCore.PolymorphicRelationships.Infrastructure.Query;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 
 namespace EntityFrameworkCore.PolymorphicRelationships;
@@ -8,6 +9,9 @@ namespace EntityFrameworkCore.PolymorphicRelationships;
 public static class DbContextOptionsBuilderExtensions
 {
     private static readonly PolymorphicQueryExpressionInterceptor QueryExpressionInterceptor = new();
+    private static readonly PolymorphicNavigationSyncInterceptor NavigationSyncInterceptor = new();
+    private static readonly PolymorphicCascadeDeleteInterceptor CascadeDeleteInterceptor = new();
+    private static readonly PolymorphicIntegrityValidationInterceptor IntegrityValidationInterceptor = new();
 
     public static DbContextOptionsBuilder UsePolymorphicRelationships(this DbContextOptionsBuilder optionsBuilder)
     {
@@ -23,10 +27,36 @@ public static class DbContextOptionsBuilderExtensions
 
         var infrastructure = (IDbContextOptionsBuilderInfrastructure)optionsBuilder;
         infrastructure.AddOrUpdateExtension(new PolymorphicRelationalOptionsExtension(polymorphicOptionsBuilder.ExperimentalSelectProjectionSupportEnabled));
-        optionsBuilder.AddInterceptors(QueryExpressionInterceptor);
-        optionsBuilder.AddInterceptors(new PolymorphicNavigationSyncInterceptor());
-        optionsBuilder.AddInterceptors(new PolymorphicCascadeDeleteInterceptor());
-        optionsBuilder.AddInterceptors(new PolymorphicIntegrityValidationInterceptor());
+
+        var configuredInterceptors = optionsBuilder.Options.FindExtension<CoreOptionsExtension>()?.Interceptors
+            ?? Enumerable.Empty<IInterceptor>();
+        var interceptorsToAdd = new List<IInterceptor>(4);
+
+        if (!configuredInterceptors.OfType<PolymorphicQueryExpressionInterceptor>().Any())
+        {
+            interceptorsToAdd.Add(QueryExpressionInterceptor);
+        }
+
+        if (!configuredInterceptors.OfType<PolymorphicNavigationSyncInterceptor>().Any())
+        {
+            interceptorsToAdd.Add(NavigationSyncInterceptor);
+        }
+
+        if (!configuredInterceptors.OfType<PolymorphicCascadeDeleteInterceptor>().Any())
+        {
+            interceptorsToAdd.Add(CascadeDeleteInterceptor);
+        }
+
+        if (!configuredInterceptors.OfType<PolymorphicIntegrityValidationInterceptor>().Any())
+        {
+            interceptorsToAdd.Add(IntegrityValidationInterceptor);
+        }
+
+        if (interceptorsToAdd.Count > 0)
+        {
+            optionsBuilder.AddInterceptors(interceptorsToAdd);
+        }
+
         return optionsBuilder;
     }
 

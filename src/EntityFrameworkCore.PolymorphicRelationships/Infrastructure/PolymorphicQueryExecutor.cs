@@ -389,9 +389,7 @@ internal static class PolymorphicQueryExecutor
             return Array.Empty<object>();
         }
 
-        return PolymorphicQueryableLoader.WherePropertyIn(dbContext.Set<TEntity>(), propertyName, typeof(TProperty), propertyValues)
-            .Cast<object>()
-            .ToList();
+        return PolymorphicQueryableLoader.ListByPropertyValues(dbContext.Set<TEntity>(), propertyName, typeof(TProperty), propertyValues);
     }
 
     private static async Task<IReadOnlyList<object>> ListByPropertyValuesCoreAsync<TEntity, TProperty>(DbContext dbContext, string propertyName, object[] propertyValues, CancellationToken cancellationToken)
@@ -409,10 +407,7 @@ internal static class PolymorphicQueryExecutor
         }
 
         var query = asNoTracking ? dbContext.Set<TEntity>().AsNoTracking() : dbContext.Set<TEntity>().AsQueryable();
-        var entities = await PolymorphicQueryableLoader.WherePropertyIn(query, propertyName, typeof(TProperty), propertyValues)
-            .ToListAsync(cancellationToken);
-
-        return entities.Cast<object>().ToList();
+        return await PolymorphicQueryableLoader.ListByPropertyValuesAsync(query, propertyName, typeof(TProperty), propertyValues, cancellationToken);
     }
 
     private static IQueryable<TEntity> FilterByTwoProperties<TEntity, TPropertyOne, TPropertyTwo>(

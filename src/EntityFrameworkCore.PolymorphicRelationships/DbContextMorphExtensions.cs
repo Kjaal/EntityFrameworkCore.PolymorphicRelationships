@@ -42,7 +42,17 @@ public static class DbContextMorphExtensions
 
         if (keyValue is null)
         {
-            throw new InvalidOperationException($"The owner key '{association.PrincipalKeyPropertyName}' on '{principal.GetType().Name}' is null. This starter implementation expects morph owners to have an assigned key before the reference is set.");
+            if (principalEntry.State == EntityState.Added
+                && principalKeyEntry.Metadata.ValueGenerated != Microsoft.EntityFrameworkCore.Metadata.ValueGenerated.Never)
+            {
+                dependentEntry.Property(reference.TypePropertyName).CurrentValue = null;
+                dependentEntry.Property(reference.IdPropertyName).CurrentValue = null;
+                AssignProperty(dependent, relationshipName, principal);
+                PolymorphicPendingKeyRepairRegistry.TrackMorphReference(dbContext, dependent, relationshipName, principal);
+                return;
+            }
+
+            throw new InvalidOperationException($"The owner key '{association.PrincipalKeyPropertyName}' on '{principal.GetType().Name}' is null. Morph owners must either have an assigned key or use a store-generated key configuration that resolves during SaveChanges.");
         }
 
         dependentEntry.Property(reference.TypePropertyName).CurrentValue = association.Alias;
@@ -447,9 +457,9 @@ public static class DbContextMorphExtensions
 
             var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
             query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
-            query = PolymorphicQueryableLoader.WherePropertyIn(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds);
-
-            var dependents = await query.ToListAsync(cancellationToken);
+            var dependents = (await PolymorphicQueryableLoader.ListByPropertyValuesAsync(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds, cancellationToken))
+                .Cast<TDependent>()
+                .ToList();
             var groupedDependents = new Dictionary<object, List<TDependent>>(EqualityComparer<object>.Default);
 
             foreach (var dependent in dependents)
@@ -536,9 +546,9 @@ public static class DbContextMorphExtensions
 
             var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
             query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
-            query = PolymorphicQueryableLoader.WherePropertyIn(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds);
-
-            var dependents = await query.ToListAsync(cancellationToken);
+            var dependents = (await PolymorphicQueryableLoader.ListByPropertyValuesAsync(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds, cancellationToken))
+                .Cast<TDependent>()
+                .ToList();
 
             var groupedDependents = new Dictionary<object, List<TDependent>>(EqualityComparer<object>.Default);
             foreach (var dependent in dependents)
@@ -733,10 +743,11 @@ public static class DbContextMorphExtensions
 
             var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
             query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
-            query = PolymorphicQueryableLoader.WherePropertyIn(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds);
             query = PolymorphicQueryableLoader.OrderByProperty(query, orderPropertyName, orderPropertyType, aggregate == MorphOneOfManyAggregate.Max);
 
-            var dependents = await query.ToListAsync(cancellationToken);
+            var dependents = (await PolymorphicQueryableLoader.ListByPropertyValuesAsync(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds, cancellationToken))
+                .Cast<TDependent>()
+                .ToList();
             var selectedByOwner = new Dictionary<object, TDependent>(EqualityComparer<object>.Default);
             foreach (var dependent in dependents)
             {
@@ -948,9 +959,9 @@ public static class DbContextMorphExtensions
         }
 
         var query = ApplyQueryTransform(dbContext.Set<TRelated>().AsQueryable(), queryTransform);
-        query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds);
-
-        var typedRelatedEntities = await query.ToListAsync(cancellationToken);
+        var typedRelatedEntities = (await PolymorphicQueryableLoader.ListByPropertyValuesAsync(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds, cancellationToken))
+            .Cast<TRelated>()
+            .ToList();
         AssignProperty(principal, relationshipName, typedRelatedEntities);
         RecordLoadedCollectionSnapshot(dbContext, principal, relationshipName, typedRelatedEntities);
         return typedRelatedEntities;
@@ -1040,8 +1051,9 @@ public static class DbContextMorphExtensions
             }
 
             var query = ApplyQueryTransform(dbContext.Set<TRelated>().AsQueryable(), queryTransform);
-            query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds);
-            var relatedEntities = await query.ToListAsync(cancellationToken);
+            var relatedEntities = (await PolymorphicQueryableLoader.ListByPropertyValuesAsync(query, relation.RelatedKeyPropertyName, relation.RelatedKeyType, relatedIds, cancellationToken))
+                .Cast<TRelated>()
+                .ToList();
 
             var relatedLookup = relatedEntities.ToDictionary(
                 related => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, related!, relation.RelatedKeyPropertyName), relation.RelatedKeyType),
@@ -1169,8 +1181,9 @@ public static class DbContextMorphExtensions
         }
 
         var query = ApplyQueryTransform(dbContext.Set<TPrincipal>().AsQueryable(), queryTransform);
-        query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds);
-        var typedPrincipals = await query.ToListAsync(cancellationToken);
+        var typedPrincipals = (await PolymorphicQueryableLoader.ListByPropertyValuesAsync(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds, cancellationToken))
+            .Cast<TPrincipal>()
+            .ToList();
         AssignProperty(related, inverseRelationshipName, typedPrincipals);
         RecordLoadedCollectionSnapshot(dbContext, related, inverseRelationshipName, typedPrincipals);
         return typedPrincipals;
@@ -1260,8 +1273,9 @@ public static class DbContextMorphExtensions
             }
 
             var query = ApplyQueryTransform(dbContext.Set<TPrincipal>().AsQueryable(), queryTransform);
-            query = PolymorphicQueryableLoader.WherePropertyIn(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds);
-            var principals = await query.ToListAsync(cancellationToken);
+            var principals = (await PolymorphicQueryableLoader.ListByPropertyValuesAsync(query, relation.PrincipalKeyPropertyName, relation.PrincipalKeyType, principalIds, cancellationToken))
+                .Cast<TPrincipal>()
+                .ToList();
 
             var principalLookup = principals.ToDictionary(
                 principal => NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, principal!, relation.PrincipalKeyPropertyName), relation.PrincipalKeyType),
@@ -1423,9 +1437,9 @@ public static class DbContextMorphExtensions
 
             var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
             query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
-            query = PolymorphicQueryableLoader.WherePropertyIn(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds);
-
-            var dependents = await query.ToListAsync(cancellationToken);
+            var dependents = (await PolymorphicQueryableLoader.ListByPropertyValuesAsync(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds, cancellationToken))
+                .Cast<TDependent>()
+                .ToList();
             var byOwner = new Dictionary<object, TDependent>(EqualityComparer<object>.Default);
             foreach (var dependent in dependents)
             {

@@ -333,6 +333,7 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 - translated native query support currently focuses on selected `morphMany` aggregate filters and owner-property ordering rather than the full space of polymorphic query expressions
 - native translated owner-property access currently expects an explicit owner cast in the query expression
 - translated native query support currently requires single-table relational mappings for the translated owner/dependent entity
+- temporary-key repair currently requires table-mapped entities with single-column primary keys for the repaired dependent/pivot rows
 - native `Select(...)` polymorphic projection support is experimental and requires explicit opt-in
 - experimental native `Select(...)` projection support requires a `DbContextOptions` constructor that can be used to create a companion `DbContext`
 - automatic removal sync only applies to relationships that were loaded through package APIs in the current `DbContext`

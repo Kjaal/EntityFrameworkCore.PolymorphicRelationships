@@ -10,9 +10,9 @@ env:
   DOTNET_NOLOGO: true
 
 jobs:
-  pack:
-    name: Pack Release Artifacts
-    runs-on: ubuntu-latest
+  test-windows:
+    name: Windows Smoke
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -26,14 +26,166 @@ jobs:
       - name: Restore
         run: dotnet restore "EntityFrameworkCore.PolymorphicRelationships.sln"
 
+      - name: Test library suite
+        run: dotnet test "EntityFrameworkCore.PolymorphicRelationships.sln" --configuration Release --no-restore
+
+  test-linux-postgres:
+    name: Linux PostgreSQL
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      POLYMORPHIC_TEST_POSTGRES: Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore "EntityFrameworkCore.PolymorphicRelationships.sln"
+
+      - name: Test library suite with PostgreSQL
+        run: dotnet test "EntityFrameworkCore.PolymorphicRelationships.sln" --configuration Release --no-restore
+
+  test-linux-mysql:
+    name: Linux MySQL
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: mysql
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      POLYMORPHIC_TEST_MYSQL: Server=127.0.0.1;Port=3306;Database=mysql;User=root;Password=mysql;SslMode=None;AllowPublicKeyRetrieval=True
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore "EntityFrameworkCore.PolymorphicRelationships.sln"
+
+      - name: Test library suite with MySQL
+        run: dotnet test "EntityFrameworkCore.PolymorphicRelationships.sln" --configuration Release --no-restore
+
+  test-linux-sqlserver:
+    name: Linux SQL Server
+    runs-on: ubuntu-latest
+
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          SA_PASSWORD: Strong!Passw0rd
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Strong!Passw0rd -Q 'SELECT 1' -C || exit 1"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 15
+
+    env:
+      POLYMORPHIC_TEST_SQLSERVER: Server=localhost,1433;User ID=sa;Password=Strong!Passw0rd;TrustServerCertificate=True;Encrypt=False;Database=master
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore "EntityFrameworkCore.PolymorphicRelationships.sln"
+
+      - name: Test library suite with SQL Server
+        run: dotnet test "EntityFrameworkCore.PolymorphicRelationships.sln" --configuration Release --no-restore
+
+  pack:
+    name: Pack Release Artifacts
+    runs-on: ubuntu-latest
+    needs:
+      - test-windows
+      - test-linux-postgres
+      - test-linux-mysql
+      - test-linux-sqlserver
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore "EntityFrameworkCore.PolymorphicRelationships.sln"
+
+      - name: Derive package version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "package_version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "package_version=0.1.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build
         run: dotnet build "src/EntityFrameworkCore.PolymorphicRelationships/EntityFrameworkCore.PolymorphicRelationships.csproj" --configuration Release --no-restore
 
       - name: Pack
-        run: dotnet pack "src/EntityFrameworkCore.PolymorphicRelationships/EntityFrameworkCore.PolymorphicRelationships.csproj" --configuration Release --no-build --output artifacts
+        run: dotnet pack "src/EntityFrameworkCore.PolymorphicRelationships/EntityFrameworkCore.PolymorphicRelationships.csproj" --configuration Release --no-build --output artifacts /p:Version=${{ steps.version.outputs.package_version }}
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: polymorphicrelationships-release
           path: artifacts/*
+
+      - name: Publish to NuGet
+        if: github.ref_type == 'tag' && secrets.NUGET_API_KEY != ''
+        run: dotnet nuget push "artifacts/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Publish symbol package to NuGet
+        if: github.ref_type == 'tag' && secrets.NUGET_API_KEY != ''
+        run: dotnet nuget push "artifacts/*.snupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
