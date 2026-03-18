@@ -26,7 +26,7 @@ internal static class PolymorphicRelationshipResolver
             var relatedType = elementType!;
             var references = PolymorphicModelMetadata.GetReferences(model);
 
-            if (references.Any(reference => reference.DependentType == relatedType
+            if (references.Any(reference => TypesMatch(reference.DependentType, relatedType)
                 && reference.Associations.Any(association => association.Multiplicity == MorphMultiplicity.Many
                     && association.PrincipalType.IsAssignableFrom(entityType)
                     && string.Equals(association.InverseRelationshipName, propertyName, StringComparison.Ordinal))))
@@ -35,14 +35,14 @@ internal static class PolymorphicRelationshipResolver
             }
 
             if (PolymorphicModelMetadata.GetManyToManyRelations(model).Any(relation => relation.PrincipalType.IsAssignableFrom(entityType)
-                && relation.RelatedType == relatedType
+                && TypesMatch(relation.RelatedType, relatedType)
                 && string.Equals(relation.RelationshipName, propertyName, StringComparison.Ordinal)))
             {
                 return new RelationshipKind(RelationshipType.MorphToMany, relatedType);
             }
 
             if (PolymorphicModelMetadata.GetManyToManyRelations(model).Any(relation => relation.RelatedType.IsAssignableFrom(entityType)
-                && relation.PrincipalType == relatedType
+                && TypesMatch(relation.PrincipalType, relatedType)
                 && string.Equals(relation.InverseRelationshipName, propertyName, StringComparison.Ordinal)))
             {
                 return new RelationshipKind(RelationshipType.MorphedByMany, relatedType);
@@ -54,13 +54,13 @@ internal static class PolymorphicRelationshipResolver
         var propertyType = property.PropertyType;
         var modelReferences = PolymorphicModelMetadata.GetReferences(model);
 
-        if (modelReferences.Any(reference => reference.DependentType == entityType
+        if (modelReferences.Any(reference => reference.DependentType.IsAssignableFrom(entityType)
             && string.Equals(reference.RelationshipName, propertyName, StringComparison.Ordinal)))
         {
             return new RelationshipKind(RelationshipType.MorphOwner, propertyType);
         }
 
-        if (modelReferences.Any(reference => reference.DependentType == propertyType
+        if (modelReferences.Any(reference => TypesMatch(reference.DependentType, propertyType)
             && reference.Associations.Any(association => association.Multiplicity == MorphMultiplicity.One
                 && association.PrincipalType.IsAssignableFrom(entityType)
                 && string.Equals(association.InverseRelationshipName, propertyName, StringComparison.Ordinal))))
@@ -87,6 +87,13 @@ internal static class PolymorphicRelationshipResolver
 
         elementType = propertyInfo.PropertyType.GenericTypeArguments.FirstOrDefault();
         return elementType is not null;
+    }
+
+    private static bool TypesMatch(Type registeredType, Type actualType)
+    {
+        return registeredType == actualType
+            || registeredType.IsAssignableFrom(actualType)
+            || actualType.IsAssignableFrom(registeredType);
     }
 
     internal readonly record struct RelationshipKind(RelationshipType Kind, Type? RelatedType);

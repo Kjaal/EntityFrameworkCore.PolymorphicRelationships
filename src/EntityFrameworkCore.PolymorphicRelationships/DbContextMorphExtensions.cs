@@ -1341,48 +1341,51 @@ public static class DbContextMorphExtensions
             return results;
         }
 
-        var (reference, association) = PolymorphicModelMetadata.GetRequiredInverse(
-            dbContext.Model,
-            typeof(TPrincipal),
-            typeof(TDependent),
-            inverseRelationshipName,
-            MorphMultiplicity.One);
-
-        var principalIds = new List<EntityKeyState<TPrincipal>>(principals.Count);
-        var ownerIds = new HashSet<object>(EqualityComparer<object>.Default);
-
-        foreach (var principal in principals)
+        foreach (var principalGroup in principals.GroupBy(principal => principal!.GetType()))
         {
-            var ownerId = GetEntityKeyValueOrNull(dbContext, principal, association.PrincipalKeyPropertyName);
-            principalIds.Add(new EntityKeyState<TPrincipal>(principal, ownerId));
-            if (ownerId is not null)
+            var (reference, association) = PolymorphicModelMetadata.GetRequiredInverse(
+                dbContext.Model,
+                principalGroup.Key,
+                typeof(TDependent),
+                inverseRelationshipName,
+                MorphMultiplicity.One);
+
+            var principalIds = new List<EntityKeyState<TPrincipal>>();
+            var ownerIds = new HashSet<object>(EqualityComparer<object>.Default);
+
+            foreach (var principal in principalGroup)
             {
-                ownerIds.Add(NormalizeLookupKey(ownerId, reference.IdPropertyType));
-            }
-        }
-
-        var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
-        query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
-        query = PolymorphicQueryableLoader.WherePropertyIn(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds);
-
-        var dependents = await query.ToListAsync(cancellationToken);
-        var byOwner = new Dictionary<object, TDependent>(EqualityComparer<object>.Default);
-        foreach (var dependent in dependents)
-        {
-            var ownerKey = NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, dependent, reference.IdPropertyName), reference.IdPropertyType);
-            byOwner.TryAdd(ownerKey, dependent);
-        }
-
-        foreach (var item in principalIds)
-        {
-            TDependent? dependent = null;
-            if (item.OwnerId is not null)
-            {
-                byOwner.TryGetValue(NormalizeLookupKey(item.OwnerId, reference.IdPropertyType), out dependent);
+                var ownerId = GetEntityKeyValueOrNull(dbContext, principal, association.PrincipalKeyPropertyName);
+                principalIds.Add(new EntityKeyState<TPrincipal>(principal, ownerId));
+                if (ownerId is not null)
+                {
+                    ownerIds.Add(NormalizeLookupKey(ownerId, reference.IdPropertyType));
+                }
             }
 
-            AssignProperty(item.Entity, inverseRelationshipName, dependent);
-            results[item.Entity] = dependent;
+            var query = ApplyQueryTransform(dbContext.Set<TDependent>().AsQueryable(), queryTransform);
+            query = PolymorphicQueryableLoader.WherePropertyEquals(query, reference.TypePropertyName, typeof(string), association.Alias);
+            query = PolymorphicQueryableLoader.WherePropertyIn(query, reference.IdPropertyName, reference.IdPropertyType, ownerIds);
+
+            var dependents = await query.ToListAsync(cancellationToken);
+            var byOwner = new Dictionary<object, TDependent>(EqualityComparer<object>.Default);
+            foreach (var dependent in dependents)
+            {
+                var ownerKey = NormalizeLookupKey(GetPropertyValueViaEntry(dbContext, dependent, reference.IdPropertyName), reference.IdPropertyType);
+                byOwner.TryAdd(ownerKey, dependent);
+            }
+
+            foreach (var item in principalIds)
+            {
+                TDependent? dependent = null;
+                if (item.OwnerId is not null)
+                {
+                    byOwner.TryGetValue(NormalizeLookupKey(item.OwnerId, reference.IdPropertyType), out dependent);
+                }
+
+                AssignProperty(item.Entity, inverseRelationshipName, dependent);
+                results[item.Entity] = dependent;
+            }
         }
 
         return results;

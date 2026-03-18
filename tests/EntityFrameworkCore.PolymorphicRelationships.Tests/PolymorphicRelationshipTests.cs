@@ -418,6 +418,35 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task Native_where_supports_casted_polymorphic_owner_property_on_relational_provider()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var zPost = new Post { Id = 74, Title = "Zulu" };
+        var aPost = new Post { Id = 75, Title = "Alpha" };
+        var video = new Video { Id = 76, Title = "Video" };
+        var firstComment = new Comment { Id = 717, Body = "Zulu comment" };
+        var secondComment = new Comment { Id = 718, Body = "Alpha comment" };
+        var thirdComment = new Comment { Id = 719, Body = "Video comment" };
+
+        dbContext.AddRange(zPost, aPost, video, firstComment, secondComment, thirdComment);
+        dbContext.SetMorphReference(firstComment, nameof(Comment.Commentable), zPost);
+        dbContext.SetMorphReference(secondComment, nameof(Comment.Commentable), aPost);
+        dbContext.SetMorphReference(thirdComment, nameof(Comment.Commentable), video);
+        await dbContext.SaveChangesAsync();
+
+        var filteredBodies = await dbContext.Comments
+            .Where(entity => ((Post)entity.Commentable!).Title == "Alpha")
+            .Select(entity => entity.Body)
+            .ToListAsync();
+
+        Assert.Equal(new[] { secondComment.Body }, filteredBodies);
+    }
+
+    [Fact]
     public async Task Native_where_supports_polymorphic_collection_count_on_relational_provider()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -465,10 +494,18 @@ public sealed class PolymorphicRelationshipTests
         var gtOne = await dbContext.Posts.Where(entity => entity.Comments.Count > 1).Select(entity => entity.Id).ToListAsync();
         var eqZero = await dbContext.Posts.Where(entity => entity.Comments.Count == 0).Select(entity => entity.Id).OrderBy(entity => entity).ToListAsync();
         var neqZero = await dbContext.Posts.Where(entity => entity.Comments.Count != 0).Select(entity => entity.Id).ToListAsync();
+        var gteTwo = await dbContext.Posts.Where(entity => entity.Comments.Count >= 2).Select(entity => entity.Id).ToListAsync();
+        var lteZero = await dbContext.Posts.Where(entity => entity.Comments.Count <= 0).Select(entity => entity.Id).OrderBy(entity => entity).ToListAsync();
+        var ltOne = await dbContext.Posts.Where(entity => entity.Comments.Count < 1).Select(entity => entity.Id).OrderBy(entity => entity).ToListAsync();
+        var exactTwo = await dbContext.Posts.Where(entity => entity.Comments.Count == 2).Select(entity => entity.Id).ToListAsync();
 
         Assert.Equal(new[] { firstPost.Id }, gtOne);
         Assert.Equal(new[] { secondPost.Id, thirdPost.Id }, eqZero);
         Assert.Equal(new[] { firstPost.Id }, neqZero);
+        Assert.Equal(new[] { firstPost.Id }, gteTwo);
+        Assert.Equal(new[] { secondPost.Id, thirdPost.Id }, lteZero);
+        Assert.Equal(new[] { secondPost.Id, thirdPost.Id }, ltOne);
+        Assert.Equal(new[] { firstPost.Id }, exactTwo);
     }
 
     [Fact]

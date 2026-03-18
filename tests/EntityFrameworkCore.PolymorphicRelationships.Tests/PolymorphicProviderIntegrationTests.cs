@@ -34,21 +34,31 @@ public sealed class PolymorphicProviderIntegrationTests
             var aPost = new ProviderPost { Id = 2, Title = "Alpha" };
             var firstComment = new ProviderComment { Id = 10, Body = "Zulu comment" };
             var secondComment = new ProviderComment { Id = 11, Body = "Alpha comment" };
+            var thirdComment = new ProviderComment { Id = 12, Body = "Zulu comment 2" };
 
-            dbContext.AddRange(zPost, aPost, firstComment, secondComment);
+            dbContext.AddRange(zPost, aPost, firstComment, secondComment, thirdComment);
             dbContext.SetMorphReference(firstComment, nameof(ProviderComment.Commentable), zPost);
             dbContext.SetMorphReference(secondComment, nameof(ProviderComment.Commentable), aPost);
+            dbContext.SetMorphReference(thirdComment, nameof(ProviderComment.Commentable), zPost);
             await dbContext.SaveChangesAsync();
 
             var postsWithComments = await dbContext.Posts.Where(entity => entity.Comments.Any()).ToListAsync();
+            var postsWithTwoComments = await dbContext.Posts.Where(entity => entity.Comments.Count >= 2).ToListAsync();
             var orderedBodies = await dbContext.Comments
                 .Where(entity => entity.CommentableType == "provider_posts")
                 .OrderBy(entity => ((ProviderPost)entity.Commentable!).Title)
                 .Select(entity => entity.Body)
                 .ToListAsync();
+            var filteredBodies = await dbContext.Comments
+                .Where(entity => ((ProviderPost)entity.Commentable!).Title == "Alpha")
+                .Select(entity => entity.Body)
+                .ToListAsync();
 
             Assert.Equal(2, postsWithComments.Count);
+            Assert.Single(postsWithTwoComments);
+            Assert.Equal(zPost.Id, postsWithTwoComments[0].Id);
             Assert.Equal(new[] { secondComment.Body, firstComment.Body }, orderedBodies);
+            Assert.Equal(new[] { secondComment.Body }, filteredBodies);
         }
         finally
         {
@@ -71,8 +81,20 @@ public sealed class PolymorphicProviderIntegrationTests
             .OrderBy(entity => ((ProviderPost)entity.Commentable!).Title)
             .Select(entity => entity.Body);
 
+        var filteredQuery = dbContext.Comments
+            .Where(entity => ((ProviderPost)entity.Commentable!).Title == "Alpha")
+            .Select(entity => entity.Body);
+
+        var countQuery = dbContext.Posts
+            .Where(entity => entity.Comments.Count >= 2)
+            .Select(entity => entity.Id);
+
         var queryString = query.ToQueryString();
+        var filteredQueryString = filteredQuery.ToQueryString();
+        var countQueryString = countQuery.ToQueryString();
         Assert.Contains("ORDER BY", queryString, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("WHERE", filteredQueryString, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("COUNT", countQueryString, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string CreatePostgresConnectionString(string databaseName)

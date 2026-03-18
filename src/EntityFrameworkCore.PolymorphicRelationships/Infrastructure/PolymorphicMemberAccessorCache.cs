@@ -43,7 +43,35 @@ internal static class PolymorphicMemberAccessorCache
         if (accessor.PropertyType.IsInstanceOfType(value))
         {
             accessor.Setter(target, value);
+            return;
         }
+
+        if (accessor.ElementType is not null && value is IEnumerable enumerable && value is not string)
+        {
+            if (accessor.ListFactory is null)
+            {
+                throw new InvalidOperationException($"Property '{target.GetType().Name}.{propertyName}' could not be initialized as a collection.");
+            }
+
+            var collection = accessor.ListFactory();
+            if (accessor.CollectionAdd is null)
+            {
+                throw new InvalidOperationException($"Property '{target.GetType().Name}.{propertyName}' must implement ICollection<{accessor.ElementType.Name}>.");
+            }
+
+            foreach (var item in enumerable)
+            {
+                if (item is not null)
+                {
+                    accessor.CollectionAdd(collection, item);
+                }
+            }
+
+            accessor.Setter(target, collection);
+            return;
+        }
+
+        throw new InvalidOperationException($"Property '{target.GetType().Name}.{propertyName}' cannot be assigned a value of type '{value.GetType().Name}'.");
     }
 
     public static void AddCollectionValue(object target, string propertyName, object value)

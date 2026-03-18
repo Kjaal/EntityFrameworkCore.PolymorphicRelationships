@@ -36,7 +36,8 @@ internal static class PolymorphicProjectionAccessor
 
     private static object? LoadMorphOwner(object dependent, DbContext dbContext, string relationshipName)
     {
-        var reference = PolymorphicModelMetadata.GetRequiredReference(dbContext.Model, dependent.GetType(), relationshipName);
+        var dependentType = GetEffectiveEntityType(dbContext.Model, dependent.GetType());
+        var reference = PolymorphicModelMetadata.GetRequiredReference(dbContext.Model, dependentType, relationshipName);
         var typeAlias = PolymorphicMemberAccessorCache.GetValue(dbContext, dependent, reference.TypePropertyName) as string;
         var ownerId = PolymorphicMemberAccessorCache.GetValue(dbContext, dependent, reference.IdPropertyName);
 
@@ -64,9 +65,10 @@ internal static class PolymorphicProjectionAccessor
 
     private static object LoadMorphMany(object principal, DbContext dbContext, string relationshipName, Type dependentType)
     {
+        var principalType = GetEffectiveEntityType(dbContext.Model, principal.GetType());
         var (reference, association) = PolymorphicModelMetadata.GetRequiredInverse(
             dbContext.Model,
-            principal.GetType(),
+            principalType,
             dependentType,
             relationshipName,
             MorphMultiplicity.Many);
@@ -94,9 +96,10 @@ internal static class PolymorphicProjectionAccessor
 
     private static object? LoadMorphOne(object principal, DbContext dbContext, string relationshipName, Type dependentType)
     {
+        var principalType = GetEffectiveEntityType(dbContext.Model, principal.GetType());
         var (reference, association) = PolymorphicModelMetadata.GetRequiredInverse(
             dbContext.Model,
-            principal.GetType(),
+            principalType,
             dependentType,
             relationshipName,
             MorphMultiplicity.One);
@@ -123,7 +126,8 @@ internal static class PolymorphicProjectionAccessor
 
     private static object LoadMorphToMany(object principal, DbContext dbContext, string relationshipName, Type relatedType)
     {
-        var relation = PolymorphicModelMetadata.GetRequiredManyToMany(dbContext.Model, principal.GetType(), relatedType, relationshipName);
+        var principalType = GetEffectiveEntityType(dbContext.Model, principal.GetType());
+        var relation = PolymorphicModelMetadata.GetRequiredManyToMany(dbContext.Model, principalType, relatedType, relationshipName);
         var ownerId = PolymorphicMemberAccessorCache.GetValue(dbContext, principal, relation.PrincipalKeyPropertyName);
         if (ownerId is null)
         {
@@ -160,7 +164,8 @@ internal static class PolymorphicProjectionAccessor
 
     private static object LoadMorphedByMany(object related, DbContext dbContext, string relationshipName, Type principalType)
     {
-        var relation = PolymorphicModelMetadata.GetRequiredMorphedByMany(dbContext.Model, related.GetType(), principalType, relationshipName);
+        var relatedType = GetEffectiveEntityType(dbContext.Model, related.GetType());
+        var relation = PolymorphicModelMetadata.GetRequiredMorphedByMany(dbContext.Model, relatedType, principalType, relationshipName);
         var relatedId = PolymorphicMemberAccessorCache.GetValue(dbContext, related, relation.RelatedKeyPropertyName);
         if (relatedId is null)
         {
@@ -204,5 +209,13 @@ internal static class PolymorphicProjectionAccessor
         }
 
         return list;
+    }
+
+    private static Type GetEffectiveEntityType(Microsoft.EntityFrameworkCore.Metadata.IReadOnlyModel model, Type runtimeType)
+    {
+        var entityType = model.FindEntityType(runtimeType);
+        return entityType?.ClrType
+            ?? model.GetEntityTypes().FirstOrDefault(candidate => candidate.ClrType.IsAssignableFrom(runtimeType))?.ClrType
+            ?? runtimeType;
     }
 }

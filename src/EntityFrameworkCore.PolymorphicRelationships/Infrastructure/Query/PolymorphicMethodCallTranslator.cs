@@ -133,7 +133,17 @@ internal sealed class PolymorphicMethodCallTranslator(
             return null;
         }
 
+        if (ownerEntityType.GetTableName() is null || ownerEntityType.GetViewName() is not null)
+        {
+            throw new NotSupportedException($"Polymorphic owner-property translation currently requires a table-mapped owner entity. '{ownerEntityType.DisplayName()}' uses an unsupported relational mapping.");
+        }
+
         var selectExpression = sqlExpressionFactory.Select(ownerEntityType);
+        if (selectExpression.Tables.Count != 1)
+        {
+            throw new NotSupportedException($"Polymorphic owner-property translation currently supports only single-table mapped entities. '{ownerEntityType.DisplayName()}' produced {selectExpression.Tables.Count} SQL tables.");
+        }
+
         var table = selectExpression.Tables.Single();
         var storeObject = StoreObjectIdentifier.Table(ownerEntityType.GetTableName()!, ownerEntityType.GetSchema());
 
@@ -231,6 +241,11 @@ internal sealed class PolymorphicMethodCallTranslator(
             return false;
         }
 
+        if (dependentEntityType.GetTableName() is null || dependentEntityType.GetViewName() is not null)
+        {
+            throw new NotSupportedException($"Polymorphic collection translation currently requires a table-mapped dependent entity. '{dependentEntityType.DisplayName()}' uses an unsupported relational mapping.");
+        }
+
         var dependentKeyProperty = dependentEntityType.FindProperty(reference.IdPropertyName);
         var dependentTypeProperty = dependentEntityType.FindProperty(reference.TypePropertyName);
         if (dependentKeyProperty is null || dependentTypeProperty is null)
@@ -239,6 +254,11 @@ internal sealed class PolymorphicMethodCallTranslator(
         }
 
         selectExpression = sqlExpressionFactory.Select(dependentEntityType);
+        if (selectExpression.Tables.Count != 1)
+        {
+            throw new NotSupportedException($"Polymorphic collection translation currently supports only single-table mapped entities. '{dependentEntityType.DisplayName()}' produced {selectExpression.Tables.Count} SQL tables.");
+        }
+
         var table = selectExpression.Tables.Single();
         var storeObject = StoreObjectIdentifier.Table(dependentEntityType.GetTableName()!, dependentEntityType.GetSchema());
 

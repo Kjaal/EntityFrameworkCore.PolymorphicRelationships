@@ -282,6 +282,8 @@ internal static class PolymorphicModelMetadata
     {
         var state = GetCachedState(model);
         return state.ReferencesByDependent.GetValueOrDefault((dependentType, relationshipName))
+            ?? state.References.FirstOrDefault(reference => reference.DependentType.IsAssignableFrom(dependentType)
+                && string.Equals(reference.RelationshipName, relationshipName, StringComparison.Ordinal))
             ?? throw new InvalidOperationException($"No morphTo relationship named '{relationshipName}' is registered for '{dependentType.Name}'.");
     }
 
@@ -293,7 +295,13 @@ internal static class PolymorphicModelMetadata
         MorphMultiplicity multiplicity)
     {
         var state = GetCachedState(model);
-        if (state.InverseAssociations.TryGetValue((dependentType, inverseRelationshipName, multiplicity), out var candidates))
+        var candidates = state.InverseAssociations.TryGetValue((dependentType, inverseRelationshipName, multiplicity), out var exactCandidates)
+            ? exactCandidates
+            : state.InverseAssociations.FirstOrDefault(entry => entry.Key.DependentType.IsAssignableFrom(dependentType)
+                && string.Equals(entry.Key.InverseRelationshipName, inverseRelationshipName, StringComparison.Ordinal)
+                && entry.Key.Multiplicity == multiplicity).Value;
+
+        if (candidates is not null)
         {
             foreach (var candidate in candidates)
             {

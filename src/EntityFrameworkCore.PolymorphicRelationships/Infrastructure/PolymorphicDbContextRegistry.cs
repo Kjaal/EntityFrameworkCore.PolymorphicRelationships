@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Linq.Expressions;
+using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 
@@ -7,23 +8,45 @@ namespace EntityFrameworkCore.PolymorphicRelationships.Infrastructure;
 
 internal static class PolymorphicDbContextRegistry
 {
-    private static readonly ConcurrentDictionary<Guid, Registration> Contexts = new();
+    private static readonly ConcurrentDictionary<Guid, WeakReference<DbContext>> Contexts = new();
+    private static readonly ConditionalWeakTable<DbContext, Registration> Registrations = new();
 
     public static Guid Register(DbContext dbContext)
     {
+        CleanupDeadEntries();
+
         var id = dbContext.ContextId.InstanceId;
-        Contexts[id] = new Registration(dbContext.GetService<IDbContextOptions>(), CreateFactory(dbContext));
+        Contexts[id] = new WeakReference<DbContext>(dbContext);
+        Registrations.Remove(dbContext);
+        Registrations.Add(dbContext, new Registration(dbContext.GetService<IDbContextOptions>(), CreateFactory(dbContext)));
         return id;
     }
 
     public static DbContext CreateCompanionContext(Guid contextId)
     {
-        if (Contexts.TryGetValue(contextId, out var registration))
+        CleanupDeadEntries();
+
+        if (Contexts.TryGetValue(contextId, out var reference)
+            && reference.TryGetTarget(out var dbContext)
+            && Registrations.TryGetValue(dbContext, out var registration))
         {
             return registration.Factory(registration.Options);
         }
 
+        Contexts.TryRemove(contextId, out _);
+
         throw new InvalidOperationException($"No active DbContext was registered for polymorphic projection id '{contextId}'.");
+    }
+
+    private static void CleanupDeadEntries()
+    {
+        foreach (var entry in Contexts)
+        {
+            if (!entry.Value.TryGetTarget(out _))
+            {
+                Contexts.TryRemove(entry.Key, out _);
+            }
+        }
     }
 
     private static Func<IDbContextOptions, DbContext> CreateFactory(DbContext dbContext)
