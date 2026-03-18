@@ -246,9 +246,7 @@ public sealed class PolymorphicProviderIntegrationTests
 
     private static void EnsureProviderAvailabilityOrSkip(ProviderBackend backend)
     {
-        if (Environment.GetEnvironmentVariable("CI") == "true"
-            || Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true"
-            || !string.IsNullOrWhiteSpace(GetProviderConnectionOverride(backend)))
+        if (!string.IsNullOrWhiteSpace(GetProviderConnectionOverride(backend)))
         {
             throw new InvalidOperationException($"The {backend} provider test environment is required but could not be reached.");
         }
