@@ -18,30 +18,48 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
     {
         if (eventData.Context is not null)
         {
+            var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(eventData.Context);
+            if (saveScope.IsRepairSave)
+            {
+                return base.SavingChanges(eventData, result);
+            }
+
             SyncNavigations(eventData.Context);
+            BeginRepairScopeIfNeeded(eventData.Context);
         }
 
         return base.SavingChanges(eventData, result);
     }
 
-    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+    public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
         DbContextEventData eventData,
         InterceptionResult<int> result,
         CancellationToken cancellationToken = default)
     {
         if (eventData.Context is not null)
         {
+            var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(eventData.Context);
+            if (saveScope.IsRepairSave)
+            {
+                return await base.SavingChangesAsync(eventData, result, cancellationToken);
+            }
+
             SyncNavigations(eventData.Context);
+            await BeginRepairScopeIfNeededAsync(eventData.Context, cancellationToken);
         }
 
-        return base.SavingChangesAsync(eventData, result, cancellationToken);
+        return await base.SavingChangesAsync(eventData, result, cancellationToken);
     }
 
     public override int SavedChanges(SaveChangesCompletedEventData eventData, int result)
     {
         if (eventData.Context is not null)
         {
-            result += RepairTemporaryKeyAssignments(eventData.Context);
+            var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(eventData.Context);
+            if (!saveScope.IsRepairSave && saveScope.IsActive)
+            {
+                CompletePendingKeyRepairScope(eventData.Context);
+            }
         }
 
         return base.SavedChanges(eventData, result);
@@ -54,7 +72,11 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
     {
         if (eventData.Context is not null)
         {
-            result += await RepairTemporaryKeyAssignmentsAsync(eventData.Context, cancellationToken);
+            var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(eventData.Context);
+            if (!saveScope.IsRepairSave && saveScope.IsActive)
+            {
+                await CompletePendingKeyRepairScopeAsync(eventData.Context, cancellationToken);
+            }
         }
 
         return await base.SavedChangesAsync(eventData, result, cancellationToken);
@@ -64,7 +86,11 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
     {
         if (eventData.Context is not null)
         {
-            PolymorphicPendingKeyRepairRegistry.Reset(eventData.Context);
+            var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(eventData.Context);
+            if (!saveScope.IsRepairSave)
+            {
+                CleanupFailedRepairScope(eventData.Context);
+            }
         }
 
         base.SaveChangesFailed(eventData);
@@ -74,10 +100,42 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
     {
         if (eventData.Context is not null)
         {
-            PolymorphicPendingKeyRepairRegistry.Reset(eventData.Context);
+            var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(eventData.Context);
+            if (!saveScope.IsRepairSave)
+            {
+                await CleanupFailedRepairScopeAsync(eventData.Context);
+            }
         }
 
         await base.SaveChangesFailedAsync(eventData, cancellationToken);
+    }
+
+    public override void SaveChangesCanceled(DbContextEventData eventData)
+    {
+        if (eventData.Context is not null)
+        {
+            var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(eventData.Context);
+            if (!saveScope.IsRepairSave)
+            {
+                CleanupFailedRepairScope(eventData.Context);
+            }
+        }
+
+        base.SaveChangesCanceled(eventData);
+    }
+
+    public override async Task SaveChangesCanceledAsync(DbContextEventData eventData, CancellationToken cancellationToken = default)
+    {
+        if (eventData.Context is not null)
+        {
+            var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(eventData.Context);
+            if (!saveScope.IsRepairSave)
+            {
+                await CleanupFailedRepairScopeAsync(eventData.Context);
+            }
+        }
+
+        await base.SaveChangesCanceledAsync(eventData, cancellationToken);
     }
 
     private static void SyncNavigations(DbContext dbContext)
@@ -302,44 +360,192 @@ public sealed class PolymorphicNavigationSyncInterceptor : SaveChangesIntercepto
             : Convert.ToString(PolymorphicValueConverter.ConvertForAssignment(keyValue, keyProperty.ClrType), System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
     }
 
-    private static int RepairTemporaryKeyAssignments(DbContext dbContext)
+    private static void BeginRepairScopeIfNeeded(DbContext dbContext)
     {
-        if (!PolymorphicPendingKeyRepairRegistry.TryBeginRepair(dbContext))
+        var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(dbContext);
+        if (saveScope.IsActive || !PolymorphicPendingKeyRepairRegistry.HasPendingRepairs(dbContext))
         {
-            return 0;
+            return;
         }
+
+        if (dbContext.Database.CurrentTransaction is not null)
+        {
+            saveScope.IsActive = true;
+            return;
+        }
+
+        if (!dbContext.Database.IsRelational())
+        {
+            return;
+        }
+
+        saveScope.OwnedTransaction = dbContext.Database.BeginTransaction();
+        saveScope.IsActive = true;
+    }
+
+    private static async Task BeginRepairScopeIfNeededAsync(DbContext dbContext, CancellationToken cancellationToken)
+    {
+        var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(dbContext);
+        if (saveScope.IsActive || !PolymorphicPendingKeyRepairRegistry.HasPendingRepairs(dbContext))
+        {
+            return;
+        }
+
+        if (dbContext.Database.CurrentTransaction is not null)
+        {
+            saveScope.IsActive = true;
+            return;
+        }
+
+        if (!dbContext.Database.IsRelational())
+        {
+            return;
+        }
+
+        saveScope.OwnedTransaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        saveScope.IsActive = true;
+    }
+
+    private static void CompletePendingKeyRepairScope(DbContext dbContext)
+    {
+        var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(dbContext);
 
         try
         {
-            var pendingRepairs = PolymorphicPendingKeyRepairRegistry.Drain(dbContext);
-            ApplyPendingRepairs(dbContext, pendingRepairs);
-            return dbContext.ChangeTracker.HasChanges() ? dbContext.SaveChanges() : 0;
+            if (PolymorphicPendingKeyRepairRegistry.TryBeginRepair(dbContext))
+            {
+                try
+                {
+                    var pendingRepairs = PolymorphicPendingKeyRepairRegistry.Drain(dbContext);
+                    ApplyPendingRepairs(dbContext, pendingRepairs);
+
+                    if (dbContext.ChangeTracker.HasChanges())
+                    {
+                        saveScope.IsRepairSave = true;
+                        _ = dbContext.SaveChanges();
+                    }
+                }
+                finally
+                {
+                    saveScope.IsRepairSave = false;
+                    PolymorphicPendingKeyRepairRegistry.EndRepair(dbContext);
+                }
+            }
+
+            saveScope.OwnedTransaction?.Commit();
+            CleanupCompletedRepairScope(dbContext);
         }
-        finally
+        catch
         {
-            PolymorphicPendingKeyRepairRegistry.EndRepair(dbContext);
+            CleanupFailedRepairScope(dbContext);
+            throw;
         }
     }
 
-    private static async Task<int> RepairTemporaryKeyAssignmentsAsync(DbContext dbContext, CancellationToken cancellationToken)
+    private static async Task CompletePendingKeyRepairScopeAsync(DbContext dbContext, CancellationToken cancellationToken)
     {
-        if (!PolymorphicPendingKeyRepairRegistry.TryBeginRepair(dbContext))
-        {
-            return 0;
-        }
+        var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(dbContext);
 
         try
         {
-            var pendingRepairs = PolymorphicPendingKeyRepairRegistry.Drain(dbContext);
-            ApplyPendingRepairs(dbContext, pendingRepairs);
-            return dbContext.ChangeTracker.HasChanges()
-                ? await dbContext.SaveChangesAsync(cancellationToken)
-                : 0;
+            if (PolymorphicPendingKeyRepairRegistry.TryBeginRepair(dbContext))
+            {
+                try
+                {
+                    var pendingRepairs = PolymorphicPendingKeyRepairRegistry.Drain(dbContext);
+                    ApplyPendingRepairs(dbContext, pendingRepairs);
+
+                    if (dbContext.ChangeTracker.HasChanges())
+                    {
+                        saveScope.IsRepairSave = true;
+                        _ = await dbContext.SaveChangesAsync(cancellationToken);
+                    }
+                }
+                finally
+                {
+                    saveScope.IsRepairSave = false;
+                    PolymorphicPendingKeyRepairRegistry.EndRepair(dbContext);
+                }
+            }
+
+            if (saveScope.OwnedTransaction is not null)
+            {
+                await saveScope.OwnedTransaction.CommitAsync(cancellationToken);
+            }
+
+            await CleanupCompletedRepairScopeAsync(dbContext);
         }
-        finally
+        catch
         {
-            PolymorphicPendingKeyRepairRegistry.EndRepair(dbContext);
+            await CleanupFailedRepairScopeAsync(dbContext);
+            throw;
         }
+    }
+
+    private static void CleanupCompletedRepairScope(DbContext dbContext)
+    {
+        var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(dbContext);
+        saveScope.OwnedTransaction?.Dispose();
+        saveScope.OwnedTransaction = null;
+        saveScope.IsActive = false;
+        saveScope.IsRepairSave = false;
+        PolymorphicPendingKeyRepairRegistry.Reset(dbContext);
+    }
+
+    private static async Task CleanupCompletedRepairScopeAsync(DbContext dbContext)
+    {
+        var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(dbContext);
+        if (saveScope.OwnedTransaction is not null)
+        {
+            await saveScope.OwnedTransaction.DisposeAsync();
+        }
+
+        saveScope.OwnedTransaction = null;
+        saveScope.IsActive = false;
+        saveScope.IsRepairSave = false;
+        PolymorphicPendingKeyRepairRegistry.Reset(dbContext);
+    }
+
+    private static void CleanupFailedRepairScope(DbContext dbContext)
+    {
+        var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(dbContext);
+
+        try
+        {
+            saveScope.OwnedTransaction?.Rollback();
+        }
+        catch
+        {
+        }
+
+        saveScope.OwnedTransaction?.Dispose();
+        saveScope.OwnedTransaction = null;
+        saveScope.IsActive = false;
+        saveScope.IsRepairSave = false;
+        PolymorphicPendingKeyRepairRegistry.Reset(dbContext);
+    }
+
+    private static async Task CleanupFailedRepairScopeAsync(DbContext dbContext)
+    {
+        var saveScope = PolymorphicRepairSaveScopeRegistry.GetState(dbContext);
+
+        if (saveScope.OwnedTransaction is not null)
+        {
+            try
+            {
+                await saveScope.OwnedTransaction.RollbackAsync();
+            }
+            catch
+            {
+            }
+
+            await saveScope.OwnedTransaction.DisposeAsync();
+        }
+
+        saveScope.OwnedTransaction = null;
+        saveScope.IsActive = false;
+        saveScope.IsRepairSave = false;
+        PolymorphicPendingKeyRepairRegistry.Reset(dbContext);
     }
 
     private static void ApplyPendingRepairs(DbContext dbContext, PolymorphicPendingKeyRepairRegistry.PendingRepairBatch pendingRepairs)

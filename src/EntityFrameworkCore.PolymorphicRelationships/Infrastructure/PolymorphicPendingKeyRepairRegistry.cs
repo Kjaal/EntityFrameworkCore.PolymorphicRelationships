@@ -44,6 +44,14 @@ internal static class PolymorphicPendingKeyRepairRegistry
         return true;
     }
 
+    public static bool HasPendingRepairs(DbContext dbContext)
+    {
+        ArgumentNullException.ThrowIfNull(dbContext);
+
+        var state = States.GetValue(dbContext, static _ => new PendingState());
+        return state.MorphReferenceRepairs.Count > 0 || state.MorphToManyRepairs.Count > 0;
+    }
+
     public static PendingRepairBatch Drain(DbContext dbContext)
     {
         ArgumentNullException.ThrowIfNull(dbContext);

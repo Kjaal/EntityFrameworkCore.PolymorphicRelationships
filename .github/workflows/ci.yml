@@ -7,6 +7,9 @@ on:
       - master
   pull_request:
 
+env:
+  DOTNET_NOLOGO: true
+
 jobs:
   test-windows:
     name: Windows Smoke
@@ -136,3 +139,36 @@ jobs:
 
       - name: Test library suite with SQL Server
         run: dotnet test "EntityFrameworkCore.PolymorphicRelationships.sln" --configuration Release --no-restore
+
+  package:
+    name: Pack NuGet
+    runs-on: ubuntu-latest
+    needs:
+      - test-windows
+      - test-linux-postgres
+      - test-linux-mysql
+      - test-linux-sqlserver
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore "EntityFrameworkCore.PolymorphicRelationships.sln"
+
+      - name: Build package project
+        run: dotnet build "src/EntityFrameworkCore.PolymorphicRelationships/EntityFrameworkCore.PolymorphicRelationships.csproj" --configuration Release --no-restore
+
+      - name: Pack NuGet package
+        run: dotnet pack "src/EntityFrameworkCore.PolymorphicRelationships/EntityFrameworkCore.PolymorphicRelationships.csproj" --configuration Release --no-build --output artifacts
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: polymorphicrelationships-package
+          path: artifacts/*

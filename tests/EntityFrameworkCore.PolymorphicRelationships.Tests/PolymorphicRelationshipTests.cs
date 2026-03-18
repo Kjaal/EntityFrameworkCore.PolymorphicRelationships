@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations.Schema;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Data.Sqlite;
 
 namespace EntityFrameworkCore.PolymorphicRelationships.Tests;
@@ -102,6 +103,52 @@ public sealed class PolymorphicRelationshipTests
 
         var storedComment = await dbContext.Comments.AsNoTracking().SingleAsync(entity => entity.Id == comment.Id);
         Assert.Equal(post.Id, storedComment.CommentableId);
+    }
+
+    [Fact]
+    public async Task SaveChanges_with_temporary_key_repairs_returns_user_entity_count()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        await using var dbContext = CreateSqliteContext(connection);
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var post = new Post { Title = "Generated owner" };
+        var comment = new Comment { Body = "Generated child" };
+
+        dbContext.AddRange(post, comment);
+        dbContext.SetMorphReference(comment, nameof(Comment.Commentable), post);
+        var affectedRows = await dbContext.SaveChangesAsync();
+
+        Assert.Equal(2, affectedRows);
+    }
+
+    [Fact]
+    public async Task SaveChanges_rolls_back_temporary_key_repairs_when_repair_phase_fails()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+
+        await using (var setupContext = CreateSqliteContext(connection))
+        {
+            await setupContext.Database.EnsureCreatedAsync();
+        }
+
+        await using (var failingContext = CreateSqliteContext(connection, interceptors: [new FailingSecondSaveInterceptor()]))
+        {
+            var post = new Post { Title = "Generated owner" };
+            var comment = new Comment { Body = "Generated child" };
+
+            failingContext.AddRange(post, comment);
+            failingContext.SetMorphReference(comment, nameof(Comment.Commentable), post);
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => failingContext.SaveChangesAsync());
+            Assert.Contains("Simulated repair failure", exception.Message);
+        }
+
+        await using var assertContext = CreateSqliteContext(connection);
+        Assert.Equal(0, await assertContext.Posts.CountAsync());
+        Assert.Equal(0, await assertContext.Comments.CountAsync());
     }
 
     [Fact]
@@ -766,6 +813,38 @@ public sealed class PolymorphicRelationshipTests
     }
 
     [Fact]
+    public async Task Native_select_projection_requires_a_companion_context_options_constructor()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+
+        var options = new DbContextOptionsBuilder<ProjectionConstructorMismatchDbContext>()
+            .UseSqlite(connection)
+            .UsePolymorphicRelationships(options => options.EnableExperimentalSelectProjectionSupport())
+            .Options;
+
+        await using var dbContext = new ProjectionConstructorMismatchDbContext(options, new ProjectionDependency());
+        await dbContext.Database.EnsureCreatedAsync();
+
+        var post = new ProjectionPost { Id = 1, Title = "Post" };
+        var comment = new ProjectionComment { Id = 2, Body = "Comment" };
+        dbContext.AddRange(post, comment);
+        dbContext.SetMorphReference(comment, nameof(ProjectionComment.Commentable), post);
+        await dbContext.SaveChangesAsync();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await dbContext.Posts
+                .Where(entity => entity.Id == post.Id)
+                .Select(entity => new ProjectionPostResult
+                {
+                    Comments = entity.Comments,
+                })
+                .SingleAsync());
+
+        Assert.Contains("must expose a single-parameter constructor accepting DbContextOptions", exception.Message);
+    }
+
+    [Fact]
     public async Task Guid_primary_keys_work_for_morph_relationships()
     {
         await using var dbContext = CreateGuidContext();
@@ -977,10 +1056,15 @@ public sealed class PolymorphicRelationshipTests
         return new GuidTestDbContext(options);
     }
 
-    private static TestDbContext CreateSqliteContext(SqliteConnection connection, bool enableExperimentalProjectionSupport = false)
+    private static TestDbContext CreateSqliteContext(SqliteConnection connection, bool enableExperimentalProjectionSupport = false, params IInterceptor[] interceptors)
     {
         var optionsBuilder = new DbContextOptionsBuilder<TestDbContext>()
             .UseSqlite(connection);
+
+        if (interceptors.Length > 0)
+        {
+            optionsBuilder.AddInterceptors(interceptors);
+        }
 
         if (enableExperimentalProjectionSupport)
         {
@@ -992,6 +1076,37 @@ public sealed class PolymorphicRelationshipTests
         }
 
         return new TestDbContext(optionsBuilder.Options);
+    }
+
+    private sealed class FailingSecondSaveInterceptor : SaveChangesInterceptor
+    {
+        private int _saveAttempts;
+
+        public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
+        {
+            ThrowIfSecondSave();
+            return base.SavingChanges(eventData, result);
+        }
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            ThrowIfSecondSave();
+            return base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
+
+        private void ThrowIfSecondSave()
+        {
+            _saveAttempts++;
+            if (_saveAttempts < 2)
+            {
+                return;
+            }
+
+            throw new InvalidOperationException("Simulated repair failure.");
+        }
     }
 
     private sealed class TestDbContext(DbContextOptions<TestDbContext> options) : DbContext(options)
@@ -1055,6 +1170,64 @@ public sealed class PolymorphicRelationshipTests
 
             base.OnModelCreating(modelBuilder);
         }
+    }
+
+    private sealed class ProjectionConstructorMismatchDbContext(
+        DbContextOptions<ProjectionConstructorMismatchDbContext> options,
+        ProjectionDependency dependency) : DbContext(options)
+    {
+        private ProjectionDependency Dependency { get; } = dependency;
+
+        public DbSet<ProjectionPost> Posts => Set<ProjectionPost>();
+
+        public DbSet<ProjectionComment> Comments => Set<ProjectionComment>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            _ = Dependency;
+
+            modelBuilder.UsePolymorphicRelationships(polymorphic =>
+            {
+                polymorphic.MorphMap<ProjectionPost>("projection_posts");
+
+                polymorphic.Entity<ProjectionComment>()
+                    .MorphTo(nameof(ProjectionComment.Commentable), entity => entity.CommentableType, entity => entity.CommentableId)
+                    .MorphMany<ProjectionPost>(nameof(ProjectionPost.Comments));
+            });
+
+            base.OnModelCreating(modelBuilder);
+        }
+    }
+
+    private sealed class ProjectionDependency;
+
+    private sealed class ProjectionPost
+    {
+        public int Id { get; set; }
+
+        public string Title { get; set; } = string.Empty;
+
+        [NotMapped]
+        public List<ProjectionComment> Comments { get; set; } = new();
+    }
+
+    private sealed class ProjectionComment
+    {
+        public int Id { get; set; }
+
+        public string Body { get; set; } = string.Empty;
+
+        public string? CommentableType { get; set; }
+
+        public int? CommentableId { get; set; }
+
+        [NotMapped]
+        public object? Commentable { get; set; }
+    }
+
+    private sealed class ProjectionPostResult
+    {
+        public List<ProjectionComment> Comments { get; set; } = new();
     }
 
     private sealed class GuidTestDbContext(DbContextOptions<GuidTestDbContext> options) : DbContext(options)

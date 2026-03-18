@@ -91,7 +91,7 @@ await dbContext.SaveChangesAsync();
 
 The package synchronizes the morph type and morph id during `SaveChanges` and `SaveChangesAsync`, so adding dependents through configured inverse navigations works like a regular EF-style relationship.
 
-Store-generated keys are also supported for newly added owners and newly added many-to-many pairs. If an owner or related entity receives its key from the database, the package repairs the final morph values after the insert completes.
+Store-generated keys are also supported for newly added owners and newly added many-to-many pairs. If an owner or related entity receives its key from the database, the package repairs the final morph values within the same relational save transaction before the save completes.
 
 Direct dependent-side navigation assignment is also supported:
 
@@ -178,6 +178,8 @@ var projectedComment = await dbContext.Comments
 
 Native `Select(...)` projection support currently remains experimental. It works for polymorphic navigations without introducing a separate projection API, but projection-time polymorphic navigation loading is resolved after the root query is materialized and uses a companion `DbContext`. For production workloads, prefer `IncludeMorph(...)` or the lower-level load helpers unless you explicitly accept these tradeoffs.
 
+Experimental projection support also expects the registered `DbContext` type to expose a single-parameter constructor accepting `DbContextOptions`. Contexts that require additional constructor dependencies are not supported by this feature.
+
 ### Native translated query support
 
 ```csharp
@@ -207,6 +209,7 @@ The package currently supports native translated query shapes for:
 
 - `morphMany.Any()`
 - `morphMany.Count` comparisons such as `> 0`, `> 1`, `== 0`, and `!= 0`
+- owner-property filters for `morphTo` when the owner type is explicitly cast in the query
 - owner-property ordering for `morphTo` when the owner type is explicitly cast in the query
 
 Provider support for translated query shapes is currently exercised through dedicated execution coverage for:
@@ -218,6 +221,8 @@ Provider support for translated query shapes is currently exercised through dedi
 SQLite continues to provide the fast relational test bed for the broader library suite. PostgreSQL remains the primary relational target for translated polymorphic query behavior, while SQL Server and MySQL now have provider-specific execution scenarios in the integration test matrix.
 
 Native translated query support is intentionally narrower than native `Select(...)` projection support. Unsupported shapes should continue to use `IncludeMorph(...)` or the lower-level helper APIs.
+
+Translated query support currently requires single-table relational mappings for the translated owner/dependent entity. View-mapped entities, multi-table inheritance mappings, and other multi-table relational shapes should use `IncludeMorph(...)` or the explicit load helpers instead of native translated LINQ.
 
 ### Advanced loading helpers
 
@@ -327,7 +332,9 @@ protected override void OnModelCreating(ModelBuilder modelBuilder)
 - one-of-many selection is limited to a single ordering expression
 - translated native query support currently focuses on selected `morphMany` aggregate filters and owner-property ordering rather than the full space of polymorphic query expressions
 - native translated owner-property access currently expects an explicit owner cast in the query expression
+- translated native query support currently requires single-table relational mappings for the translated owner/dependent entity
 - native `Select(...)` polymorphic projection support is experimental and requires explicit opt-in
+- experimental native `Select(...)` projection support requires a `DbContextOptions` constructor that can be used to create a companion `DbContext`
 - automatic removal sync only applies to relationships that were loaded through package APIs in the current `DbContext`
 - Laravel features such as `morphToMany` custom pivot behavior and broader relationship macros are not yet fully mirrored
 

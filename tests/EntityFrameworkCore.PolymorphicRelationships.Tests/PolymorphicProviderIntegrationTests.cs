@@ -17,15 +17,33 @@ public sealed class PolymorphicProviderIntegrationTests
     }
 
     [Fact]
+    public async Task PostgreSql_enforces_uniqueness_and_loaded_removal_sync()
+    {
+        await RunProviderIntegrityScenarioAsync(ProviderBackend.PostgreSql);
+    }
+
+    [Fact]
     public async Task SqlServer_executes_runtime_and_translated_polymorphic_queries()
     {
         await RunProviderScenarioAsync(ProviderBackend.SqlServer);
     }
 
     [Fact]
+    public async Task SqlServer_enforces_uniqueness_and_loaded_removal_sync()
+    {
+        await RunProviderIntegrityScenarioAsync(ProviderBackend.SqlServer);
+    }
+
+    [Fact]
     public async Task MySql_executes_runtime_and_translated_polymorphic_queries()
     {
         await RunProviderScenarioAsync(ProviderBackend.MySql);
+    }
+
+    [Fact]
+    public async Task MySql_enforces_uniqueness_and_loaded_removal_sync()
+    {
+        await RunProviderIntegrityScenarioAsync(ProviderBackend.MySql);
     }
 
     private static async Task RunProviderScenarioAsync(ProviderBackend backend)
@@ -95,6 +113,68 @@ public sealed class PolymorphicProviderIntegrationTests
             Assert.Equal(zuluPost.Id, postsWithTwoComments[0].Id);
             Assert.Equal(new[] { secondComment.Body, firstComment.Body, thirdComment.Body }, orderedBodies);
             Assert.Equal(new[] { secondComment.Body }, filteredBodies);
+        }
+        finally
+        {
+            await DropDatabaseAsync(backend, databaseName);
+        }
+    }
+
+    private static async Task RunProviderIntegrityScenarioAsync(ProviderBackend backend)
+    {
+        var databaseName = $"poly_pkg_integrity_{Guid.NewGuid():N}";
+
+        if (!await CanConnectAsync(backend))
+        {
+            return;
+        }
+
+        try
+        {
+            await RecreateDatabaseAsync(backend, databaseName);
+
+            var connectionString = CreateConnectionString(backend, databaseName);
+            await using var dbContext = new ProviderTestDbContext(CreateOptions(backend, connectionString));
+            await dbContext.Database.EnsureCreatedAsync();
+
+            var post = new ProviderPost { Title = "Owner" };
+            var firstComment = new ProviderComment { Body = "First" };
+            var secondComment = new ProviderComment { Body = "Second" };
+            var tag = new ProviderTag { Name = "shared" };
+
+            dbContext.AddRange(post, firstComment, secondComment, tag);
+            dbContext.SetMorphReference(firstComment, nameof(ProviderComment.Commentable), post);
+            dbContext.SetMorphReference(secondComment, nameof(ProviderComment.Commentable), post);
+            dbContext.AttachMorphToMany<ProviderPost, ProviderTag, ProviderTagAssignment>(post, nameof(ProviderPost.Tags), tag);
+            await dbContext.SaveChangesAsync();
+
+            await dbContext.LoadMorphManyAsync<ProviderPost, ProviderComment>(
+                post,
+                nameof(ProviderPost.Comments),
+                query => query.Where(entity => entity.Id == firstComment.Id));
+
+            post.Comments.Clear();
+            dbContext.AttachMorphToMany<ProviderPost, ProviderTag, ProviderTagAssignment>(post, nameof(ProviderPost.Tags), tag);
+            await dbContext.SaveChangesAsync();
+
+            var reloadedFirst = await dbContext.Comments.SingleAsync(entity => entity.Id == firstComment.Id);
+            var reloadedSecond = await dbContext.Comments.SingleAsync(entity => entity.Id == secondComment.Id);
+            var pivots = await dbContext.TagAssignments.ToListAsync();
+
+            Assert.Null(reloadedFirst.CommentableType);
+            Assert.Null(reloadedFirst.CommentableId);
+            Assert.Equal("provider_posts", reloadedSecond.CommentableType);
+            Assert.Equal(post.Id, reloadedSecond.CommentableId);
+            Assert.Single(pivots);
+
+            var firstImage = new ProviderImage { Url = "/first.png" };
+            var secondImage = new ProviderImage { Url = "/second.png" };
+            dbContext.AddRange(firstImage, secondImage);
+            dbContext.SetMorphReference(firstImage, nameof(ProviderImage.Imageable), post);
+            dbContext.SetMorphReference(secondImage, nameof(ProviderImage.Imageable), post);
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => dbContext.SaveChangesAsync());
+            Assert.Contains("allows only one dependent", exception.Message);
         }
         finally
         {
@@ -366,6 +446,8 @@ END";
 
         public DbSet<ProviderComment> Comments => Set<ProviderComment>();
 
+        public DbSet<ProviderImage> Images => Set<ProviderImage>();
+
         public DbSet<ProviderTag> Tags => Set<ProviderTag>();
 
         public DbSet<ProviderTagAssignment> TagAssignments => Set<ProviderTagAssignment>();
@@ -379,6 +461,10 @@ END";
                 polymorphic.Entity<ProviderComment>()
                     .MorphTo(nameof(ProviderComment.Commentable), entity => entity.CommentableType, entity => entity.CommentableId)
                     .MorphMany<ProviderPost>(nameof(ProviderPost.Comments));
+
+                polymorphic.Entity<ProviderImage>()
+                    .MorphTo(nameof(ProviderImage.Imageable), entity => entity.ImageableType, entity => entity.ImageableId)
+                    .MorphOne<ProviderPost>(nameof(ProviderPost.Image));
 
                 polymorphic.MorphToMany<ProviderPost, ProviderTag, ProviderTagAssignment, int, int>(
                     nameof(ProviderPost.Tags),
@@ -403,6 +489,9 @@ END";
 
         [NotMapped]
         public List<ProviderTag> Tags { get; set; } = new();
+
+        [NotMapped]
+        public ProviderImage? Image { get; set; }
     }
 
     private sealed class ProviderComment
@@ -427,6 +516,20 @@ END";
 
         [NotMapped]
         public List<ProviderPost> Posts { get; set; } = new();
+    }
+
+    private sealed class ProviderImage
+    {
+        public int Id { get; set; }
+
+        public string Url { get; set; } = string.Empty;
+
+        public string? ImageableType { get; set; }
+
+        public int? ImageableId { get; set; }
+
+        [NotMapped]
+        public object? Imageable { get; set; }
     }
 
     private sealed class ProviderTagAssignment

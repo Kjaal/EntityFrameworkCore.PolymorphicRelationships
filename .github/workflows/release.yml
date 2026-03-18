@@ -1,0 +1,39 @@
+name: Release Package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: true
+
+jobs:
+  pack:
+    name: Pack Release Artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore "EntityFrameworkCore.PolymorphicRelationships.sln"
+
+      - name: Build
+        run: dotnet build "src/EntityFrameworkCore.PolymorphicRelationships/EntityFrameworkCore.PolymorphicRelationships.csproj" --configuration Release --no-restore
+
+      - name: Pack
+        run: dotnet pack "src/EntityFrameworkCore.PolymorphicRelationships/EntityFrameworkCore.PolymorphicRelationships.csproj" --configuration Release --no-build --output artifacts
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: polymorphicrelationships-release
+          path: artifacts/*
